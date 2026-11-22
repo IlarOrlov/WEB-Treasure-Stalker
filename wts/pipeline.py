@@ -141,11 +141,16 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None
                         choice=opts.choice, max_playlist=opts.max_playlist, subtitles=opts.subtitles, log=log,
                         on_progress=on_progress, cancel=cancel, write_info=False)
         covered: set[str] = set()
+        mirrors: set[tuple[str, str]] = set()
         for i, cand in enumerate(candidates, 1):
             if cancelled():
                 log("[download] cancelled")
                 break
             stage(f"Downloading {i}/{len(candidates)}", 0.45 + 0.4 * (i - 1) / len(candidates))
+            if cand.source == "network" and (cand.label, urlparse(cand.url).path) in mirrors:
+                downloads.append({"candidate": cand.to_dict(), "status": "skipped", "files": [], "info": {},
+                                  "error": "mirror of a stream already downloaded (same path, other host)"})
+                continue
             if cand.source == "network" and cand.referer in covered:
                 downloads.append({"candidate": cand.to_dict(), "status": "skipped", "files": [], "info": {},
                                   "error": "stream belongs to an embed that was already downloaded"})
@@ -156,8 +161,8 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None
                 (f": {r.error[:150]}" if r.error and r.status != "downloaded" else ""))
             if r.status in ("downloaded", "duplicate"):
                 covered.add(cand.url)
-                if cand.source == "network" and r.status == "downloaded" and cand.referer:
-                    covered.add(cand.referer)  # mirrors of the same player stream are skipped
+                if cand.source == "network" and r.status == "downloaded":
+                    mirrors.add((cand.label, urlparse(cand.url).path))
             downloads.append(r.to_dict())
 
     # media analysis -----------------------------------------------------------
