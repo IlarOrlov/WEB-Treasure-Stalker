@@ -34,6 +34,18 @@ def _verdict(p: dict[str, Any]) -> str:
     return f"<div class='verdict' style='border-color:{c}'><b style='color:{c}'>{_e(p['verdict'])}</b> — score {p['score']}/100<ul>{reasons}</ul></div>"
 
 
+def _series_html(s: dict[str, Any] | None) -> str:
+    if not s:
+        return ""
+    seasons = ", ".join(f"{_e(k)}: {v}" for k, v in s.get("seasons", {}).items())
+    missing = s.get("missing") or []
+    return (f"<h2>Series: {_e(s['title'])}</h2><p>{s['episodes_found']} episodes found ({seasons}) · "
+            f"{s.get('episodes_selected', s['episodes_found'])} selected · <b>{s['episodes_downloaded']} downloaded</b> "
+            f"to <code>videos/{_e(s['title'])}/Season N/Episode MM</code></p>"
+            + (f"<details><summary>{len(missing)} selected but not downloaded</summary><pre>{_e(chr(10).join(missing))}</pre></details>"
+               if missing else ""))
+
+
 def render_html(r: dict[str, Any]) -> str:
     s = r["summary"]
     parts = [f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -57,6 +69,7 @@ code{{word-break:break-all}}
 <div class="card"><b style="color:{SEV_COLORS[s['highest_severity']]}">{_e(s['highest_severity']).upper()}</b>highest severity</div>
 <div class="card"><b style="color:{VERDICT_COLORS.get(s['piracy_verdict'])}">{s['piracy_score']}</b>{_e(s['piracy_verdict'])}</div>
 </div>
+{_series_html(r.get('series'))}
 <h2>Piracy assessment (site)</h2>{_verdict(r['piracy'])}
 <p class="muted">Heuristic analyst aid, not a legal determination.</p>
 <h2>Site security</h2>

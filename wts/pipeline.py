@@ -59,7 +59,7 @@ def _save_evidence(pages: list[PageResult], evidence: Path) -> None:
             (d / f"frame_{j:02d}.html.txt").write_text(f"<!-- {fr['url']} -->\n{fr['html']}")
 
 
-def _series_summary(series: str, episodes: dict, downloads: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _series_summary(series: str, found: dict, episodes: dict, downloads: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not series:
         return None
     got: dict[str, list[str]] = {}
@@ -67,9 +67,10 @@ def _series_summary(series: str, episodes: dict, downloads: list[dict[str, Any]]
         if d.get("episode") and d["status"] == "downloaded":
             got[d["episode"]] = d["files"]
     seasons: dict[str, list[str]] = {}
-    for k in episodes:
+    for k in found:
         seasons.setdefault(f"Season {k[0]}" if k[0] is not None else "Episodes", []).append(f"Episode {k[1]}")
-    return {"title": series, "episodes_found": len(episodes), "episodes_downloaded": len(got),
+    return {"title": series, "episodes_found": len(found), "episodes_selected": len(episodes),
+            "episodes_downloaded": len(got),
             "missing": [lbl for lbl in (f"Season {k[0]} / Episode {k[1]}" if k[0] is not None else f"Episode {k[1]}"
                                         for k in episodes) if lbl not in got],
             "seasons": {s: len(v) for s, v in seasons.items()}}
@@ -156,6 +157,7 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None
     from .episodes import episode_path, group_episodes, label_of, series_title
 
     episodes, others = group_episodes(candidates)
+    all_episodes = dict(episodes)
     series = series_title(pages[0].rendered_html or pages[0].raw_html, host) if episodes else ""
     if episodes:
         seasons = sorted({k[0] for k in episodes if k[0] is not None})
@@ -270,7 +272,7 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None
             "highest_severity": ["info", "low", "medium", "high", "critical"][worst],
             "security_findings": len(all_findings),
         },
-        "series": _series_summary(series, episodes, downloads),
+        "series": _series_summary(series, all_episodes, episodes, downloads),
         "piracy": site_piracy, "site": site,
         "pages": [{"url": p.url, "final_url": p.final_url, "status": p.status, "error": p.error,
                    "selections": p.selections, "popups": p.popups, "screenshot": p.screenshot} for p in pages],
