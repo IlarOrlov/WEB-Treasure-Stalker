@@ -1,0 +1,42 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-11-22T22:32:07Z",
+  "phase": "",
+  "phase_name": "post-release (v0.2.0 shipped)",
+  "phase_dir": "",
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": 1, "name": "Core engine: discovery, yt-dlp download, site scan, media scan, piracy scoring, reports", "status": "done", "commit": "8ff9534"},
+    {"id": 2, "name": "PySide6 GUI + single-file PyInstaller exe (Linux/Windows) + release workflow", "status": "done", "commit": "9f2a162"},
+    {"id": 3, "name": "No disk writes without user command (session temp, opt-in prefs, no registry)", "status": "done", "commit": "19c6885"},
+    {"id": 4, "name": "Series support: player menu walking, <Series>/Season N/Episode MM", "status": "done", "commit": "886ae3f"},
+    {"id": 5, "name": "Two-step site flow (analyse -> media catalogue -> choose), films, multi-player, yt-dlp platforms, protected-stream detection", "status": "done", "commit": "a1ac13f"},
+    {"id": 6, "name": "First release v0.2.0 published with Windows + Linux executables and SHA256SUMS", "status": "done", "commit": "a1ac13f"}
+  ],
+  "remaining_tasks": [
+    {"id": 7, "name": "Live test of Tools-page installers (FFmpeg, Deno, Chromium) on a clean machine", "status": "not_started"},
+    {"id": 8, "name": "Optional: let user choose install location for Tools-page installs", "status": "not_started"},
+    {"id": 9, "name": "Optional: Windows-side Process Monitor verification of no-write guarantee", "status": "not_started"}
+  ],
+  "blockers": [
+    {"description": "Auto-mode classifier blocks downloading+executing third-party binaries, so tools.install_ffmpeg/install_deno were never run live", "type": "human_action", "workaround": "User tests Install buttons on the Tools page"}
+  ],
+  "async_jobs": [],
+  "human_actions_pending": [
+    {"action": "Test Tools-page Install buttons on a machine without FFmpeg/Chromium (Windows 11)", "context": "Installer code (checksum-verified) untested live", "blocking": false}
+  ],
+  "decisions": [
+    {"decision": "Never circumvent DRM, deliberate player obfuscation, or one-time-token-protected streams", "rationale": "Same line as DRM; such streams are detected, labelled 'protected' and skipped; other players are tried instead", "phase": ""},
+    {"decision": "Spotify tracks are matched to YouTube uploads instead of downloaded from Spotify", "rationale": "Spotify audio is DRM-protected", "phase": ""},
+    {"decision": "Site mode analyses first (no downloads, no disk writes), then user picks items/folder/format", "rationale": "Explicit user requirement", "phase": ""},
+    {"decision": "Episode pages are listed (deferred) and opened only at download time", "rationale": "Fast analysis of sites with many episode pages; avoids crawl limits", "phase": ""},
+    {"decision": "Player menu walking only on start page, or on crawled pages when no episode pages are listed", "rationale": "Per-season pages often embed players listing other seasons (mislabelling) and repeat work", "phase": ""},
+    {"decision": "No Claude attribution in commits/PRs", "rationale": "User memory rule", "phase": ""}
+  ],
+  "uncommitted_files": [],
+  "next_action": "Ask the user what to do next (release is done); if they report issues, reproduce with the scratch probe approach (BrowserDiscoverer on the URL, print per-episode stream mapping) before changing code.",
+  "context_notes": "Repo: /home/feanor/Desktop/WEB-Treasure-Stalker (remote github.com/IlarOrlov/WEB-Treasure-Stalker). venv at .venv (uv, python 3.13). Tests: .venv/bin/python -m pytest -q (45 pass, 2 network-gated skips). Release: push tag vX.Y.Z -> .github/workflows/release.yml builds and publishes. Test executables in ~/Desktop/WEB-Treasure-Stalker-test (identical to v0.2.0 release)."
+}
