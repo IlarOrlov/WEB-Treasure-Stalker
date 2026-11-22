@@ -30,6 +30,7 @@ class VideoCandidate:
     referer: str = ""
     label: str = ""  # e.g. "Season 2 / Episode 5"
     page: str = ""  # page on which it was discovered
+    protected: bool = False  # the player authenticates this stream with one-time tokens (not downloadable)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

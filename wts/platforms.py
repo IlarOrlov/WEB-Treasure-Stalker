@@ -45,6 +45,24 @@ def _host(url: str) -> str:
     return (urlparse(url).hostname or "").lower()
 
 
+def ytdlp_extractor(url: str) -> str | None:
+    """Name of a dedicated yt-dlp extractor for this URL (SoundCloud, Vimeo, TikTok, Bandcamp, ...)."""
+    if not url.startswith(("http://", "https://")):
+        return None
+    from yt_dlp.extractor import gen_extractor_classes
+
+    for ie in gen_extractor_classes():
+        key = ie.ie_key()
+        if key in ("Generic", "GenericEmbed") or not ie.working():
+            continue
+        try:
+            if ie.suitable(url):
+                return key
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 def classify(url: str) -> Target | None:
     url = url.strip()
     m = re.fullmatch(r"spotify:(track|album|playlist|artist|show|episode):([A-Za-z0-9]+)", url)
@@ -57,7 +75,8 @@ def classify(url: str) -> Target | None:
             return Target("spotify", m.group(1), m.group(2), url=url)
         return Target("spotify", "other", url=url)
     if not any(host == h or host.endswith("." + h) for h in YT_HOSTS):
-        return None
+        ie = ytdlp_extractor(url)
+        return Target("ytdlp", "link", id=ie, url=url) if ie else None
     p = urlparse(url)
     q = parse_qs(p.query)
     vid = ""
@@ -186,6 +205,7 @@ class Inspection:
     video_url: str = ""
     playlist_url: str = ""
     playlist_title: str = ""
+    audio_only: bool = False
     entries: list[dict[str, Any]] = field(default_factory=list)  # {title, duration, artists?}
 
     @property
@@ -197,7 +217,44 @@ def inspect(t: Target, log: Callable[[str], None] = lambda m: None) -> Inspectio
     """Read what a YouTube/Spotify link contains without downloading anything."""
     if t.platform == "youtube":
         return _inspect_youtube(t)
+    if t.platform == "ytdlp":
+        return _inspect_ytdlp(t)
     return _inspect_spotify(t)
+
+
+def _inspect_ytdlp(t: Target) -> Inspection:
+    ins = Inspection(t, ok=False)
+    try:
+        info = _probe(t.url, flat=True, noplaylist=False)
+    except Exception as exc:  # noqa: BLE001
+        ins.message = f"No downloadable media at this link ({t.id}): {_clean_err(exc)}. Nothing will be downloaded."
+        return ins
+    entries = [e for e in (info.get("entries") or []) if e] if info.get("_type") in ("playlist", "multi_video") else []
+    if entries:
+        t.kind = "playlist"
+        ins.playlist_url = t.url
+        ins.playlist_title = ins.title = info.get("title") or t.id
+        ins.uploader = info.get("uploader") or info.get("channel") or ""
+        ins.entries = [{"title": e.get("title") or e.get("id") or "?", "duration": e.get("duration"),
+                        "uploader": e.get("uploader") or e.get("channel") or ""} for e in entries]
+        thumbs = info.get("thumbnails") or []
+        ins.thumbnail = info.get("thumbnail") or (thumbs[-1]["url"] if thumbs else "")
+    else:
+        t.kind = "video"
+        ins.video_url = info.get("webpage_url") or t.url
+        ins.title = info.get("title") or t.id
+        ins.uploader = info.get("uploader") or info.get("channel") or info.get("artist") or ""
+        ins.duration = info.get("duration")
+        ins.thumbnail = info.get("thumbnail") or ""
+        ins.is_live = bool(info.get("is_live"))
+        vc = info.get("vcodec")
+        ins.audio_only = vc == "none" or (not info.get("height") and info.get("acodec") not in (None, "none"))
+        if ins.audio_only:
+            ins.quality = f"audio · {info.get('acodec') or '?'} {int(info['abr'])} kbps" if info.get("abr") else "audio"
+        else:
+            ins.quality = f"{info.get('height') or '?'}p · {info.get('vcodec') or '?'} + {info.get('acodec') or '?'}"
+    ins.ok = True
+    return ins
 
 
 def _inspect_youtube(t: Target) -> Inspection:
@@ -316,7 +373,7 @@ def download(ins: Inspection, choice: FormatChoice, base: Path, mode: str = "aut
     kw = dict(cookiefile=cookies, cookies_from_browser=cookies_from_browser, choice=choice, write_info=False,
               use_archive=False, quarantine_files=False, log=log, on_progress=on_progress, cancel=cancel)
     downloads: list[dict[str, Any]] = []
-    if t.platform == "youtube":
+    if t.platform in ("youtube", "ytdlp"):
         if mode == "video":
             dest = base
             dl = Downloader(dest, outtmpl="%(title).150B [%(id)s].%(ext)s", noplaylist=True, **kw)
@@ -324,7 +381,7 @@ def download(ins: Inspection, choice: FormatChoice, base: Path, mode: str = "aut
             r = dl.download(VideoCandidate(ins.video_url, "platform-link", "user", label=ins.title))
             downloads.append(r.to_dict())
         else:
-            dest = base / safe_name(ins.playlist_title or t.list_id, "playlist")
+            dest = base / safe_name(ins.playlist_title or t.list_id or t.id, "playlist")
             spec = _items_spec(items)
             n = len(items) if items else len(ins.entries)
             log(f"Downloading {n} item(s) of playlist '{ins.playlist_title}'")
@@ -421,7 +478,7 @@ def run_platform(t: Target, prompter: Prompter, log: Callable[[str], None] = pri
     elif t.kind == "video-in-playlist":
         mode = "video"
     if mode == "auto" and t.kind in ("video", "track"):
-        log(f"{'Video' if t.platform == 'youtube' else 'Track'} : {ins.title}  [{_fmt_dur(ins.duration)}]  by {ins.uploader}")
+        log(f"{'Track' if t.platform == 'spotify' else 'Media'} : {ins.title}  [{_fmt_dur(ins.duration)}]  by {ins.uploader}")
         if ins.quality:
             log(f"Best  : {ins.quality}")
         if ins.is_live:
@@ -440,7 +497,7 @@ def run_platform(t: Target, prompter: Prompter, log: Callable[[str], None] = pri
         log(f"Selected {len(items) if items else len(ins.entries)} of {len(ins.entries)} item(s)")
         mode = "playlist"
     base = prompter.path("~/Downloads/WTS")
-    choice = prompter.format("mp3" if t.platform == "spotify" else "best")
+    choice = prompter.format("mp3" if t.platform == "spotify" or ins.audio_only else "best")
     log(f"Format: {choice.describe()}  ->  {base}")
     return download(ins, choice, base, mode, items, log=log, cookies=cookies,
                     cookies_from_browser=cookies_from_browser, scan=scan, use_av=use_av, save_report=save_report)

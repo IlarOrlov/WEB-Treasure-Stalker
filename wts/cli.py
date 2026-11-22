@@ -115,26 +115,38 @@ def _tools_cmd(a: argparse.Namespace) -> int:
 
 
 def _run_site(url: str, a: argparse.Namespace, prompter: Prompter) -> int:
-    from .pipeline import Options, run
+    from .pipeline import Options, analyse, download_items
+    from .prompts import expand_items
     from .report import print_summary
 
-    out = prompter.path("./output", "Output folder (a sub-folder per run is created)")
-    choice = prompter.format("best") if not a.no_download else None
-    opts = Options(out=Path(out), browser=not a.no_browser, download=not a.no_download, max_pages=a.max_pages,
+    opts = Options(browser=not a.no_browser, download=not a.no_download, max_pages=a.max_pages,
                    depth=a.depth, max_combinations=a.max_combinations, timeout=a.timeout, cookies=a.cookies,
-                   cookies_from_browser=a.cookies_from_browser, choice=choice, deep=a.deep, virustotal=a.virustotal,
+                   cookies_from_browser=a.cookies_from_browser, deep=a.deep, virustotal=a.virustotal,
                    headful=a.headful, subtitles=a.subs, av=not a.no_av, max_playlist=a.max_playlist)
-    def choose(series: str, labels: list[str]) -> list[str] | None:
-        from .prompts import expand_items
-
-        print(f"\nSeries '{series}': {len(labels)} episode(s) found")
-        for i, lb in enumerate(labels, 1):
-            print(f"  {i:>4}. {lb}")
-        spec = prompter.items(len(labels), "all")
-        return [labels[i - 1] for i in expand_items(spec, len(labels))]
-
-    opts.choose_episodes = choose
-    report, _ = run(url, opts)
+    # 1) analyse: discover every media item and scan the site (nothing is downloaded yet)
+    an = analyse(url, opts)
+    s = an.report["summary"]
+    print(f"\nPiracy: {s['piracy_verdict']} ({s['piracy_score']}/100)   Security: {s['highest_severity'].upper()} "
+          f"({s['security_findings']} findings)")
+    items = an.items
+    ids: list[str] = []
+    if items and not a.no_download:
+        print(f"\n{len(items)} downloadable item(s) found:")
+        group = None
+        for n, it in enumerate(items, 1):
+            if it.group != group:
+                group = it.group
+                print(f"  {group}")
+            extra = " (page opened at download)" if not it.sources else f" ({len(it.sources)} source(s))"
+            print(f"    {n:>4}. {it.label}{extra}")
+        # 2) choose what to download, where, and in which format
+        spec = prompter.items(len(items), "all")
+        ids = [items[i - 1].id for i in expand_items(spec, len(items))]
+    elif not items:
+        print("\nNo downloadable media found on this page.")
+    out = prompter.path("./output", "Save to folder (a sub-folder per run is created)")
+    choice = prompter.format("best") if ids else None
+    report, _ = download_items(an, ids, Path(out), choice)
     print(print_summary(report))
     return 2 if report["summary"]["highest_severity"] in ("critical", "high") else 0
 

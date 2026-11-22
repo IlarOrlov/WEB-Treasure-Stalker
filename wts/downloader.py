@@ -131,7 +131,9 @@ class Downloader:
             "quiet": True, "no_warnings": True, "noprogress": not self.progress,
             "windowsfilenames": True,
             "noplaylist": self.noplaylist, "playlistend": self.max_playlist,
-            "retries": 5, "fragment_retries": 10, "concurrent_fragment_downloads": 4,
+            # fail fast on a refused stream so the next source is tried instead of hanging
+            "retries": 3, "fragment_retries": 3, "skip_unavailable_fragments": False, "extractor_retries": 1,
+            "concurrent_fragment_downloads": 4,
             "writeinfojson": self.write_info, "clean_infojson": True,
             "writesubtitles": self.subtitles, "subtitleslangs": ["all"],
             "allow_unplayable_formats": False,  # never touch DRM-protected formats

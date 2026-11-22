@@ -33,10 +33,19 @@ SEGMENT_RE = re.compile(
     r"\.(ts|m4s|aac|m4a|vtt|srt|key|jpg|png)(\?|#|$)|/(seg|chunk|frag|fragment)[-_]?\d+|[?&](range|bytes)=|/init[-_.]|[-_.]init\.",
     re.I,
 )
-QUOTED_MEDIA_RE = re.compile(rf"""["']([^"'\s<>]+?\.(?:{MEDIA_EXT})(?:\?[^"'\s<>]*)?)["']""", re.I)
+AUDIO_EXT = r"mp3|flac|wav|opus|ogg|oga|m4a|aac|wma|alac|aiff?"
+AUDIO_URL_RE = re.compile(rf"\.({AUDIO_EXT})(\?|#|$)", re.I)
+QUOTED_MEDIA_RE = re.compile(rf"""["']([^"'\s<>]+?\.(?:{MEDIA_EXT}|mp3|flac|wav|opus|ogg)(?:\?[^"'\s<>]*)?)["']""", re.I)
+# player placeholders / silent dummies that are not real media
+JUNK_MEDIA_RE = re.compile(r"cdn\.plyr\.io/static/blank|/blank\.(mp4|webm|mp3)|/silence\.(mp3|mp4|wav)|placeholder\.(mp4|webm)|"
+                           r"/empty\.(mp4|mp3)|/1sec\.(mp4|mp3)", re.I)
+NUMBERED_EP_RE = re.compile(
+    r"(season|sezon|сезон|serija|seriya|seria|серия|episode|epizod|ep)[-_ ]?\d|\d[-_ ]?(sezon|serija|seriya|сезон|серия|season|episode)|"
+    r"(?<![a-z])s\d{1,2}[-_ ]?e\d{1,3}", re.I)
 MEDIA_CONTENT_TYPES = (
     "video/", "application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl",
     "application/dash+xml", "application/f4m",
+    "audio/mpeg", "audio/ogg", "audio/flac", "audio/x-flac", "audio/wav", "audio/x-wav", "audio/opus", "audio/webm",
 )
 IGNORE_IFRAME_RE = re.compile(
     r"googlesyndication|doubleclick|google\.com/recaptcha|recaptcha|hcaptcha|disqus|"
@@ -57,7 +66,8 @@ AD_MEDIA_RE = re.compile(
 )
 EPISODE_LINK_RE = re.compile(
     r"(season|episode|/series/|/tv/|/watch|/s\d{1,2}e\d{1,3}|[-_/]s\d{1,2}[-_]?e\d{1,3}|[-_/]ep(isode)?[-_]?\d+|"
-    r"עונה|פרק|temporada|episodio|saison|[ée]pisode|staffel|folge|сезон|серия|موسم|حلقة)",
+    r"עונה|פרק|temporada|episodio|saison|[ée]pisode|staffel|folge|сезон|серия|موسم|حلقة|"
+    r"sezon|serija|seriya|seria|seriia|epizod|bolum|capitulo)",
     re.I,
 )
 SELECT_KW = (r"(season|episode|series|serie|\bep\b|\bep\.|part|chapter|volume|temporada|episodio|saison|"
@@ -96,12 +106,16 @@ def related_episode_link(base_url: str, link: str) -> bool:
     if site_key(link) != site_key(base_url) or not EPISODE_LINK_RE.search(urlparse(link).path + "?" + urlparse(link).query):
         return False
     base_path = urlparse(base_url).path.rsplit(".", 1)[0].rstrip("/")
-    if base_path and len(base_path) > 1 and urlparse(link).path.startswith(base_path):
+    if not base_path:  # a site's home page: every numbered episode/season page belongs to it
+        return bool(NUMBERED_EP_RE.search(urlparse(link).path))
+    if len(base_path) > 1 and urlparse(link).path.startswith(base_path):
         return True
     return bool(_slug_tokens(base_url) & _slug_tokens(link))
 
 
 def classify_url(url: str) -> str:
+    if AUDIO_URL_RE.search(url):
+        return "audio"
     if MANIFEST_RE.search(url):
         return "stream"
     if MEDIA_URL_RE.search(url):
@@ -124,7 +138,7 @@ def extract_from_html(html: str, base_url: str, label: str = "") -> tuple[list[V
         if url.startswith("//"):
             url = "https:" + url
         full = _norm(urljoin(base_url, url))
-        if not _http_url(full):
+        if not _http_url(full) or JUNK_MEDIA_RE.search(full):
             return
         cands.append(VideoCandidate(url=full, kind=kind or classify_url(full), source=source,
                                     referer=base_url, label=label, page=base_url))
@@ -186,7 +200,8 @@ def extract_from_html(html: str, base_url: str, label: str = "") -> tuple[list[V
         full = _norm(urljoin(base_url, href))
         if not _http_url(full):
             continue
-        if MEDIA_URL_RE.search(full) or PLATFORM_LINK_RE.search(full) or PIRATE_HOST_RE.search(urlparse(full).netloc):
+        if (MEDIA_URL_RE.search(full) or AUDIO_URL_RE.search(urlparse(full).path) or PLATFORM_LINK_RE.search(full)
+                or PIRATE_HOST_RE.search(urlparse(full).netloc)):
             add(full, "link")
         elif site_key(full) == base_site and related_episode_link(base_url, full):
             links.append(full)
@@ -391,6 +406,9 @@ class BrowserDiscoverer:
         self._res.network.append({
             "url": req.url, "method": req.method, "type": req.resource_type, "frame": frame_url,
             "nav": req.is_navigation_request(), "referer": req.headers.get("referer", ""), "label": self._label,
+            # players that sign each media request (bearer tokens, challenge headers) protect the stream
+            "auth": any(k in req.headers for k in ("authorization", "authorizations", "accepts-controls",
+                                                    "x-access-token", "x-auth-token")),
         })
 
     def _on_response(self, resp) -> None:
@@ -407,11 +425,13 @@ class BrowserDiscoverer:
                 entry["content_type"] = ct
                 entry["length"] = headers.get("content-length", "")
                 if (is_media_response(resp.url, entry["type"], ct) and not PLATFORM_CDN_RE.search(resp.url)
-                        and not AD_MEDIA_RE.search(resp.url)):
+                        and not AD_MEDIA_RE.search(resp.url) and not JUNK_MEDIA_RE.search(resp.url)):
                     referer = entry.get("referer") or entry.get("frame") or self._res.url
                     self._res.candidates.append(VideoCandidate(
-                        url=resp.url, kind=classify_url(resp.url) if MEDIA_URL_RE.search(resp.url) else "direct",
-                        source="network", referer=referer, label=entry.get("label", ""), page=self._res.url))
+                        url=resp.url, kind=("audio" if ct.lower().startswith("audio/") else
+                                            classify_url(resp.url) if MEDIA_URL_RE.search(resp.url) else "direct"),
+                        source="network", referer=referer, label=entry.get("label", ""), page=self._res.url,
+                        protected=bool(entry.get("auth"))))
                 break
 
     def _on_page(self, page) -> None:
@@ -552,23 +572,29 @@ class BrowserDiscoverer:
     def _pm_click(self, frame, kind: str, n: int) -> bool:
         try:
             return bool(frame.evaluate("""([k, n]) => { const e = document.querySelector(`[data-wts-pm-${k}="${n}"]`);
-                if (!e) return false; e.scrollIntoView({block: 'nearest'}); e.click(); return true; }""", [kind, n]))
+                if (!e) return false;
+                if (e.tagName === 'OPTION') {  // <select> based players (e.g. Kodik)
+                  const s = e.closest('select'); if (!s) return false;
+                  s.value = e.value; s.dispatchEvent(new Event('input', {bubbles: true}));
+                  s.dispatchEvent(new Event('change', {bubbles: true})); return true; }
+                e.scrollIntoView({block: 'nearest'}); e.click(); return true; }""", [kind, n]))
         except Exception:  # noqa: BLE001
             return False
 
     def _network_urls(self) -> set[str]:
         return {c.url for c in self._res.candidates if c.source == "network"}
 
-    def _wait_new_stream(self, page, label: str, seen: set[str], seconds: float) -> bool:
-        """Wait for a stream URL that did not exist before the click and credit it to `label`."""
+    def _wait_new_stream(self, page, label: str, seen: set[str], seconds: float, fhost: str = "") -> bool:
+        """Wait for a stream URL that did not exist before the click (requested by this player) and credit it."""
+        def fresh():
+            return [c for c in self._res.candidates if c.source == "network" and c.url not in seen
+                    and c.kind == "stream" and (not fhost or urlparse(c.referer).hostname == fhost)]
         end = time.monotonic() + seconds
         while time.monotonic() < end:
-            new = [c for c in self._res.candidates if c.source == "network" and c.url not in seen]
-            if new:
+            if fresh():
                 page.wait_for_timeout(1200)  # let mirrors of the same stream arrive too
-                for c in self._res.candidates:
-                    if c.source == "network" and c.url not in seen:
-                        c.label = label
+                for c in fresh():
+                    c.label = label
                 return True
             page.wait_for_timeout(250)
             self._reap_popups()
@@ -578,6 +604,51 @@ class BrowserDiscoverer:
         try:
             frame.evaluate("() => document.querySelectorAll('video').forEach(v => { v.muted = true; "
                            "v.play && v.play().catch(() => {}); })")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _click_frame_center(self, page, frame) -> None:
+        try:
+            for sel in (".play_button", ".play-button", "[class*='play'][class*='btn']", ".vjs-big-play-button",
+                        ".jw-icon-playback", "pjsdiv[fid='1']"):
+                loc = frame.locator(sel).first
+                if loc.count() and loc.is_visible(timeout=300):
+                    loc.click(timeout=1500, no_wait_after=True)
+                    self._reap_popups()
+                    return
+            box = frame.frame_element().bounding_box()
+            if box and box["width"] > 50:
+                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                self._reap_popups()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _activate_frame(self, page, frame) -> None:
+        """Make a hidden player iframe (and its parent frames) visible, scroll to it and click it to start."""
+        chain = []
+        f = frame
+        while f is not None and f.parent_frame is not None:
+            chain.append(f)
+            f = f.parent_frame
+        for fr in reversed(chain):  # outermost first
+            try:
+                el = fr.frame_element()
+                el.evaluate("""f => { let e = f;
+                    while (e && e.nodeType === 1) { const cs = getComputedStyle(e);
+                      if (cs.display === 'none') e.style.setProperty('display', 'block', 'important');
+                      if (cs.visibility === 'hidden') e.style.setProperty('visibility', 'visible', 'important');
+                      e = e.parentElement; }
+                    if (f.offsetWidth < 200 || f.offsetHeight < 120) { f.style.width = '640px'; f.style.height = '360px'; }
+                    f.scrollIntoView({block: 'center'}); }""")
+            except Exception:  # noqa: BLE001
+                continue
+        page.wait_for_timeout(1000)
+        try:
+            box = frame.frame_element().bounding_box()
+            if box and box["width"] > 50:
+                page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                page.wait_for_timeout(2500)
+                self._reap_popups()
         except Exception:  # noqa: BLE001
             pass
 
@@ -592,6 +663,8 @@ class BrowserDiscoverer:
         except Exception:  # noqa: BLE001
             pass
         start_url = page.url
+        tried_protected = False
+        found_any = False
         for frame in frames:
             try:
                 seasons = frame.evaluate(_PLAYER_MENU_JS, "season")
@@ -602,7 +675,19 @@ class BrowserDiscoverer:
                 continue
             host = urlparse(frame.url).netloc
             self.log(f"  player playlist in {host}: {len(seasons) or 1} season(s), {len(episodes)} episode(s) in the first")
-            initial = [c for c in self._res.candidates if c.source == "network" and not c.label]
+            fhost = urlparse(frame.url).hostname or ""
+            if tried_protected:
+                before = self._network_urls()
+                self._activate_frame(page, frame)  # hidden alternative player (tabs): un-hide and start it
+                end = time.monotonic() + 15  # its first stream is the currently selected episode
+                while time.monotonic() < end and not any(
+                        c.source == "network" and c.kind == "stream" and c.url not in before
+                        and urlparse(c.referer).hostname == (urlparse(frame.url).hostname or "")
+                        for c in self._res.candidates):
+                    page.wait_for_timeout(300)
+            # streams this player had already loaded before the walk (its current episode)
+            initial = [c for c in self._res.candidates if c.source == "network" and not c.label
+                       and urlparse(c.referer).hostname == fhost]
             first = True
             for s in (seasons or [None]):
                 if self._combos >= self.max_combinations or (self.cancel is not None and self.cancel.is_set()):
@@ -645,10 +730,13 @@ class BrowserDiscoverer:
                         except Exception:  # noqa: BLE001
                             pass
                         self._pm_click(frame, "episode", e)
-                    got = self._wait_new_stream(page, label, seen, 12)
+                    got = self._wait_new_stream(page, label, seen, 12, fhost)
                     if not got:  # player waits for 'play' (or a pre-roll is running): start it and wait longer
                         self._play_in_frame(frame)
-                        got = self._wait_new_stream(page, label, seen, 20)
+                        got = self._wait_new_stream(page, label, seen, 12, fhost)
+                    if not got:  # player shows its poster again: click its play button / centre
+                        self._click_frame_center(page, frame)
+                        got = self._wait_new_stream(page, label, seen, 15, fhost)
                     if not got and first and initial:  # first episode was already loaded before the walk
                         for c in initial:
                             c.label = label
@@ -659,8 +747,18 @@ class BrowserDiscoverer:
                     self._combos += 1
                     self._res.selections.append(label)
             self._label = ""
+            mine = [c for c in self._res.candidates if c.source == "network" and c.label
+                    and urlparse(c.referer).hostname == fhost]
+            found_any = found_any or bool(mine)
+            if mine and all(c.protected for c in mine):
+                # this player signs its streams with one-time tokens: also walk the next player on the page
+                hosts = sorted({urlparse(c.url).hostname for c in mine})
+                self.log(f"  streams of {host} are token-protected ({', '.join(hosts)[:100]}); trying another player")
+                tried_protected = True
+                self._combos = 0
+                continue
             return True
-        return False
+        return found_any
 
     # season / episode enumeration -------------------------------------------
     def _walk_selects(self, page, labels: list[str], used: set[str]) -> None:

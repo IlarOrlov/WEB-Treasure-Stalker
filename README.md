@@ -27,7 +27,24 @@ A desktop app (GUI + CLI, Linux and Windows) for blue-team / OSINT work. Give it
    domains, known pirate video hosts, "we do not host any files" disclaimers, scene release names,
    CAM rips and pop-under ads.
 
-YouTube and Spotify links are handled directly, without crawling the page:
+**Web sites work in two steps:**
+
+1. **Analyse.** Nothing is downloaded and nothing is written to disk. The page is rendered, players are started,
+   their season/episode menus are walked, episode pages are listed, and the site is scanned for threats and piracy.
+2. **Choose.** You get the security and piracy report plus a media list:
+   - **Series:** Season N → Episode M. Episodes come from player menus, file names or episode pages.
+   - **Film / main video:** one entry. Every player, mirror and quality is kept as a fallback source.
+   - **Other videos and audio:** trailers, embedded clips, mp3/flac links, audio streams.
+
+   Tick what you want, pick the folder and format, and download. A series is saved as
+   `<Series>/Season N/Episode MM.ext`, a film as `<Title (year)>/<Title (year)>.ext`. Or choose **Save report only**.
+
+Some players sign every stream request with one-time access tokens (for example the Alloha network). Such streams
+are marked **protected** and are not downloaded. The tool then tries the page's other players (e.g. Kodik) and
+uses their unprotected streams when they exist.
+
+Links that yt-dlp supports directly (YouTube, SoundCloud, Vimeo, TikTok, Bandcamp, Twitch, Dailymotion and
+about 1,700 more) skip the site analysis and get a direct preview: a single item or a playlist to pick from.
 
 | Link | Behaviour |
 |---|---|
@@ -35,9 +52,10 @@ YouTube and Spotify links are handled directly, without crawling the page:
 | YouTube playlist | Lists the items and asks for **all** or a selection (`1,3,5-8`). Saves into a folder named after the playlist. |
 | YouTube video inside a playlist (`watch?v=…&list=…`) | Asks: only this video, the whole playlist, or chosen items. |
 | Spotify track / album / playlist | Reads the track list from Spotify's public embed page and asks for all or a selection. Each track is **matched to its YouTube upload**, which is what gets downloaded. Albums and playlists get their own folder. |
+| SoundCloud, Vimeo, TikTok, Bandcamp, … | Direct preview through yt-dlp; audio-only sources default to MP3. |
 
 > Spotify audio is DRM-protected. This tool never circumvents DRM (Spotify, Netflix, Widevine, PlayReady,
-> FairPlay). DRM-protected streams found on sites are reported as `drm` and skipped.
+> FairPlay) or token-protected streams. Such streams are reported and skipped.
 
 Every download asks for the **destination folder** and the **format**:
 

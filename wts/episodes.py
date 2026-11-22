@@ -10,15 +10,15 @@ from .models import VideoCandidate
 from .prompts import safe_name
 
 SEASON_W = r"(?:season|сезон|temporada|saison|staffel|stagione|sezon|עונה)"
-EPISODE_W = r"(?:episode|серия|серии|эпизод|episodio|épisode|folge|odcinek|bölüm|epizod|פרק|ep)"
+EPISODE_W = r"(?:episode|серия|серии|эпизод|episodio|épisode|folge|odcinek|bölüm|epizod|serija|seriya|seriia|seria|פרק|ep)"
 
 _PATTERNS = [
     re.compile(rf"{SEASON_W}\s*(\d{{1,2}})\s*/\s*{EPISODE_W}\s*(\d{{1,4}})", re.I),            # our own labels
     # season-1-episode-3, and season-3-episode-3-7 (season repeated before the episode number)
     re.compile(rf"{SEASON_W}[-_. ]?(\d{{1,2}})[-_. /]*{EPISODE_W}[-_. ]?(\d{{1,4}})(?:[-_.](\d{{1,3}})(?![0-9p]))?", re.I),
-    re.compile(r"(?<![a-z0-9])s(\d{1,2})[-_. ]?e(\d{1,4})(?![0-9])", re.I),                      # S01E03
+    re.compile(r"(?:^|[-_./ \[(])s(\d{1,2})[-_. ]?e(\d{1,4})(?=$|[-_./ \])])", re.I),            # S01E03 (delimited)
     re.compile(rf"(\d{{1,2}})[-_ ]?{SEASON_W}.{{0,20}}?(\d{{1,4}})[-_ ]?{EPISODE_W}", re.I),     # 1 сезон 3 серия
-    re.compile(r"(?<![0-9])(\d{1,2})x(\d{1,3})(?![0-9])", re.I),                                 # 1x03
+    re.compile(r"(?:^|[-_./ \[(])(\d{1,2})x(\d{1,3})(?=$|[-_./ \])])", re.I),                    # 1x03 (delimited)
 ]
 _EPISODE_ONLY = re.compile(rf"(?:^|[/\s-]){EPISODE_W}[-_. ]?(\d{{1,4}})\b", re.I)
 
@@ -108,5 +108,5 @@ def group_episodes(cands: list[VideoCandidate]) -> tuple[dict[tuple[int | None, 
                        if c.source == "network" and c.label and c.referer and c.referer != c.page}
         rest = [c for c in rest if not (c.source == "network" and c.referer in player_refs)]
     for k in eps:
-        eps[k].sort(key=lambda c: (0 if c.label else 1, _KIND_RANK.get(c.kind, 9)))
+        eps[k].sort(key=lambda c: (c.protected, 0 if c.label else 1, _KIND_RANK.get(c.kind, 9)))
     return dict(sorted(eps.items(), key=lambda kv: ((kv[0][0] or 0), kv[0][1]))), rest

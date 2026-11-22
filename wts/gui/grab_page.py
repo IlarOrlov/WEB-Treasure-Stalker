@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QGuiApplication, QPixmap
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QGuiApplication, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
                                QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QTreeWidget, QTreeWidgetItem,
@@ -83,10 +83,15 @@ class OptionsBar(Card):
         lay.setContentsMargins(18, 14, 18, 14)
         lay.setHorizontalSpacing(10)
         lay.setVerticalSpacing(6)
-        lay.addWidget(label("SAVE TO", "faint"), 0, 0)
-        lay.addWidget(label("FORMAT", "faint"), 0, 2)
-        lay.addWidget(label("QUALITY", "faint"), 0, 3)
+        self.hint = label("", "muted", wrap=True)
+        heads = [label("SAVE TO", "faint"), label("FORMAT", "faint"), label("QUALITY", "faint")]
+        lay.addWidget(heads[0], 0, 0)
+        lay.addWidget(heads[1], 0, 2)
+        lay.addWidget(heads[2], 0, 3)
+        lay.addWidget(self.hint, 1, 0, 1, 4)
         lay.addLayout(hbox(self.path, browse, spacing=6), 1, 0, 1, 2)
+        self._dl_widgets = heads + [self.path, browse, self.fmt, self.res]
+        self.hint.hide()
         lay.addWidget(self.fmt, 1, 2)
         lay.addWidget(self.res, 1, 3)
         lay.addWidget(self.btn, 1, 4)
@@ -102,6 +107,13 @@ class OptionsBar(Card):
     def _fmt_changed(self):
         key = self.fmt.currentData()
         self.res.setEnabled(bool(key) and FORMAT_PRESETS[key][0] == "video")
+
+    def set_analyse_mode(self, on: bool, hint: str = "") -> None:
+        """Analysis needs no folder/format: those are asked after you have seen what was found."""
+        for w in self._dl_widgets:
+            w.setVisible(not on)
+        self.hint.setText(hint)
+        self.hint.setVisible(on)
 
     def set_format(self, key: str) -> None:
         i = self.fmt.findData(key)
@@ -128,72 +140,6 @@ class OptionsBar(Card):
 # --------------------------------------------------------------------------- page
 
 
-class EpisodePicker(QDialog):
-    """Checkable season/episode tree shown before a series is downloaded."""
-
-    def __init__(self, parent, series: str, labels: list[str]):
-        super().__init__(parent)
-        self.setWindowTitle("Choose episodes")
-        self.resize(560, 640)
-        seasons: dict[str, list[str]] = {}
-        for lb in labels:
-            season = lb.split(" / ")[0] if " / " in lb else "Episodes"
-            seasons.setdefault(season, []).append(lb)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 18, 20, 18)
-        lay.setSpacing(10)
-        lay.addWidget(label(series, "h2"))
-        lay.addWidget(label(f"{len(labels)} episodes in {len(seasons)} season(s). Saved as {series}/Season N/Episode MM. "
-                            "Each episode can be 0.5–2 GB.", "muted", wrap=True))
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        for season, eps in seasons.items():
-            top = QTreeWidgetItem([f"{season}  ({len(eps)})"])
-            top.setFlags(top.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
-            top.setCheckState(0, Qt.Checked)
-            for lb in eps:
-                ch = QTreeWidgetItem([lb.split(" / ")[-1]])
-                ch.setFlags(ch.flags() | Qt.ItemIsUserCheckable)
-                ch.setCheckState(0, Qt.Checked)
-                ch.setData(0, Qt.UserRole, lb)
-                top.addChild(ch)
-            self.tree.addTopLevelItem(top)
-        self.tree.itemChanged.connect(lambda *_: self._count())
-        lay.addWidget(self.tree, 1)
-        self.count = label("", "h3")
-        none_b, all_b = QPushButton("None"), QPushButton("All")
-        none_b.setObjectName("ghost")
-        all_b.setObjectName("ghost")
-        none_b.clicked.connect(lambda: self._set(False))
-        all_b.clicked.connect(lambda: self._set(True))
-        skip = QPushButton("Skip downloads")
-        skip.clicked.connect(self.reject)
-        self.ok = QPushButton(icons.icon("download", "#ffffff", 16), "  Download selected")
-        self.ok.setObjectName("primary")
-        self.ok.clicked.connect(self.accept)
-        lay.addLayout(hbox(self.count, None, all_b, none_b))
-        lay.addLayout(hbox(None, skip, self.ok))
-        self._count()
-
-    def _items(self):
-        for i in range(self.tree.topLevelItemCount()):
-            top = self.tree.topLevelItem(i)
-            for j in range(top.childCount()):
-                yield top.child(j)
-
-    def _set(self, on: bool) -> None:
-        for i in range(self.tree.topLevelItemCount()):
-            self.tree.topLevelItem(i).setCheckState(0, Qt.Checked if on else Qt.Unchecked)
-
-    def _count(self) -> None:
-        n = len(self.selected())
-        self.count.setText(f"{n} selected")
-        self.ok.setEnabled(n > 0)
-
-    def selected(self) -> list[str]:
-        return [it.data(0, Qt.UserRole) for it in self._items() if it.checkState(0) == Qt.Checked]
-
-
 class GrabPage(QWidget):
     toast = Signal(str, str)
     request_tools = Signal()
@@ -208,6 +154,7 @@ class GrabPage(QWidget):
         self.ins: Inspection | None = None
         self.site_url = ""
         self.last_result: Any = None
+        self.analysis: Any = None
         self._job_items = 0
         self.images = ImageLoader(self)
         self.images.loaded.connect(self._image_loaded)
@@ -269,7 +216,8 @@ class GrabPage(QWidget):
     # ------------------------------------------------------------------ helpers
     def show_state(self, name: str) -> None:
         self.stack.setCurrentWidget(self.pages[name])
-        self.options.setVisible(name in ("preview", "site"))
+        show = name in ("preview", "site") or (name == "result_site" and bool(self.analysis and self.analysis.items))
+        self.options.setVisible(show)
 
     def _scroll(self, inner: QWidget) -> QScrollArea:
         sa = QScrollArea()
@@ -432,8 +380,6 @@ class GrabPage(QWidget):
         head.setStretch(1, 1)
         head.setAlignment(self.site_status, Qt.AlignTop)
         cl.addLayout(head)
-        self.site_mode = Segmented([("download", "Scan + download videos"), ("scan", "Security scan only")])
-        self.site_mode.changed.connect(lambda k: self.options.set_downloads_enabled(k == "download"))
         self.opt_depth = QSpinBox()
         self.opt_depth.setRange(0, 3)
         self.opt_depth.setValue(1)
@@ -462,7 +408,6 @@ class GrabPage(QWidget):
         g.addWidget(self.opt_deep, 1, 3)
         g.setColumnStretch(2, 1)
         g.setColumnStretch(3, 1)
-        cl.addLayout(hbox(self.site_mode, None))
         cl.addLayout(g)
         self.site_writes = label("", "faint", wrap=True)
         cl.addWidget(self.site_writes)
@@ -564,7 +509,7 @@ class GrabPage(QWidget):
         tiles = QGridLayout()
         tiles.setSpacing(10)
         self.t_pages = StatTile("pages analysed", "globe", ACCENT2)
-        self.t_cands = StatTile("videos located", "radar", ACCENT)
+        self.t_cands = StatTile("media items found", "radar", ACCENT)
         self.t_files = StatTile("files downloaded", "download", OK)
         self.t_drm = StatTile("DRM-protected", "shield", MUTED)
         self.t_sev = StatTile("highest severity", "alert", GOLD)
@@ -582,6 +527,10 @@ class GrabPage(QWidget):
         new = QPushButton(icons.icon("refresh", "#ffffff", 16), "  New scan")
         new.setObjectName("primary")
         new.clicked.connect(self.reset)
+        self.rs_save = QPushButton(icons.icon("file", MUTED, 16), "  Save report only")
+        self.rs_save.setToolTip("Save report.html/json and evidence into the folder below, without media")
+        self.rs_save.clicked.connect(lambda: self._start_downloads([]))
+        actions.addWidget(self.rs_save)
         actions.addWidget(self.rs_report)
         actions.addWidget(self.rs_folder)
         actions.addStretch(1)
@@ -589,6 +538,29 @@ class GrabPage(QWidget):
         lay.addLayout(actions)
 
         self.tabs = QTabWidget()
+        media = QWidget()
+        ml = QVBoxLayout(media)
+        ml.setContentsMargins(0, 10, 0, 0)
+        self.media_sel = label("", "h3")
+        m_all, m_none = QPushButton("All"), QPushButton("None")
+        for b in (m_all, m_none):
+            b.setObjectName("ghost")
+        m_all.clicked.connect(lambda: self._media_set(True))
+        m_none.clicked.connect(lambda: self._media_set(False))
+        ml.addLayout(hbox(self.media_sel, None, m_all, m_none))
+        self.media_tree = QTreeWidget()
+        self.media_tree.setHeaderLabels(["Media", "Sources", "Status"])
+        self.media_tree.setAlternatingRowColors(True)
+        mh = self.media_tree.header()
+        mh.setSectionResizeMode(0, QHeaderView.Stretch)
+        mh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        mh.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.media_tree.itemChanged.connect(lambda *_: self._update_media_sel())
+        self.media_tree.itemDoubleClicked.connect(self._open_item_file)
+        self.media_empty = label("No downloadable media was found on this page. The security and piracy report is "
+                                 "still available in the other tabs.", "muted", wrap=True)
+        ml.addWidget(self.media_tree, 1)
+        ml.addWidget(self.media_empty)
         self.th_tree = self._tree(["Severity", "Category", "Finding", "Evidence"], stretch=2)
         self.sev_filter = QComboBox()
         self.sev_filter.addItems(["All severities", "Critical", "High", "Medium", "Low", "Info"])
@@ -603,6 +575,7 @@ class GrabPage(QWidget):
         self.cand_tree = self._tree(["Kind", "Found via", "Label", "URL"], stretch=3)
         self.res_log = QPlainTextEdit()
         self.res_log.setReadOnly(True)
+        self.tabs.addTab(media, icons.icon("download", MUTED, 16), "Media")
         self.tabs.addTab(th, icons.icon("shield", MUTED, 16), "Threats")
         self.tabs.addTab(self.vid_tree, icons.icon("play", MUTED, 16), "Videos")
         self.tabs.addTab(self.cand_tree, icons.icon("radar", MUTED, 16), "Located")
@@ -633,6 +606,7 @@ class GrabPage(QWidget):
         if not url.startswith(("http://", "https://", "spotify:")):
             url = "https://" + url
             self.url.setText(url)
+        self.analysis = None
         self.loading_text.setText("Inspecting link…")
         self.loading_sub.setText(urlparse(url).hostname or url)
         self.spinner.start()
@@ -682,9 +656,15 @@ class GrabPage(QWidget):
             return
         t = ins.target
         is_sp = t.platform == "spotify"
-        self.pv_platform.set("SPOTIFY" if is_sp else "YOUTUBE", "#1DB954" if is_sp else "#FF3B3B")
+        if t.platform == "ytdlp":
+            self.pv_platform.set((t.id or "MEDIA").upper(), ACCENT2)
+        else:
+            self.pv_platform.set("SPOTIFY" if is_sp else "YOUTUBE", "#1DB954" if is_sp else "#FF3B3B")
+        audio = is_sp or ins.audio_only
         kind_txt = {"video": "VIDEO", "video-in-playlist": "VIDEO IN PLAYLIST", "playlist": "PLAYLIST",
                     "track": "TRACK", "album": "ALBUM"}.get(t.kind, t.kind.upper())
+        if ins.audio_only and t.kind == "video":
+            kind_txt = "TRACK"
         self.pv_kind.set(kind_txt, ACCENT)
         self.pv_title.setText(ins.title or ins.playlist_title or "(untitled)")
         meta = [x for x in (ins.uploader, fmt_dur(ins.duration),
@@ -693,7 +673,7 @@ class GrabPage(QWidget):
             meta.append("LIVE: records until the stream ends")
         self.pv_meta.setText("  ·  ".join(meta))
         self.pv_quality.setText(("Best available: " + ins.quality) if ins.quality and not is_sp else ins.quality)
-        self.thumb.setPixmap(placeholder_pixmap(256, 144, "music" if is_sp else "play", self.mode() == "dark"))
+        self.thumb.setPixmap(placeholder_pixmap(256, 144, "music" if audio else "play", self.mode() == "dark"))
         self.images.fetch(ins.thumbnail, "thumb")
         in_pl = t.kind == "video-in-playlist" and bool(ins.entries)
         self.pv_mode.setVisible(in_pl)
@@ -703,7 +683,8 @@ class GrabPage(QWidget):
                              ("A sub-folder named after the playlist is created." if t.kind == "playlist" else ""))
         self._fill_entries()
         self._mode_changed("playlist" if t.kind in ("playlist", "album") or (is_sp and t.kind == "playlist") else "video")
-        self.options.set_format("mp3" if is_sp else self.settings.value("last_format", "best"))
+        self.options.set_analyse_mode(False)
+        self.options.set_format("mp3" if audio else self.settings.value("last_format", "best"))
         self.options.set_downloads_enabled(True)
         self.options.btn.setText("  Download")
         self.options.btn.setIcon(icons.icon("download", "#ffffff", 18))
@@ -779,13 +760,11 @@ class GrabPage(QWidget):
         else:
             st = d.get("status")
             self.site_status.set(f"HTTP {st}", OK if st and st < 400 else GOLD)
-        self.site_mode.set_value("download")
         self.site_writes.setText(
-            "Writes only inside the folder below: a new sub-folder <site>_<date-time> with report.html, report.json, "
-            "evidence (page HTML, scripts, screenshot, network log) and, in download mode, the videos "
-            "(made read-only). Nothing else on disk is touched.")
-        self.options.set_format(self.settings.value("last_format", "best"))
-        self.options.set_downloads_enabled(True)
+            "Analysis downloads nothing and writes nothing to your disk. Afterwards you see every media item found "
+            "with the security and piracy report, and choose what to download, where, and in which format.")
+        self.options.set_analyse_mode(True, "Step 1 of 2: analyse the site. You choose media, folder and format "
+                                            "after the analysis.")
         self.options.btn.setEnabled(True)
         self.options.btn.setText("  Start analysis")
         self.options.btn.setIcon(icons.icon("radar", "#ffffff", 18))
@@ -798,7 +777,12 @@ class GrabPage(QWidget):
         from ..tools import find_browser
 
         site = self.stack.currentWidget() is self.pages["site"]
-        downloading = not site or self.site_mode.value() == "download"
+        if self.stack.currentWidget() is self.pages["result_site"]:
+            if self._ensure_ffmpeg():
+                self.settings.setValue("last_format", self.options.fmt.currentData())
+                self._start_downloads()
+            return
+        downloading = not site
         if downloading and not self._ensure_ffmpeg():
             return
         if site and self.opt_browser.isChecked() and find_browser() is None:
@@ -813,10 +797,10 @@ class GrabPage(QWidget):
                 self.request_tools.emit()
                 return
             self.opt_browser.setChecked(False)
-        key = self.options.fmt.currentData()
-        self.settings.setValue("last_format", key)
+        if not site:
+            self.settings.setValue("last_format", self.options.fmt.currentData())
         if site:
-            self._start_site(downloading)
+            self._start_site()
         else:
             self._start_platform()
 
@@ -873,37 +857,62 @@ class GrabPage(QWidget):
 
         self._run_job(work, self._platform_done, self._job_failed)
 
-    def _start_site(self, downloading: bool) -> None:
+    def _start_site(self) -> None:
         from ..pipeline import Options
 
-        opts = Options(out=self.options.folder(), browser=self.opt_browser.isChecked(), download=downloading,
-                       max_pages=self.opt_pages.value(), depth=self.opt_depth.value(),
-                       max_combinations=300 if self.opt_menus.isChecked() else 0,
-                       choice=self.options.choice() if downloading else None, deep=self.opt_deep.isChecked(),
-                       headful=self.opt_headful.isChecked(), av=self.opt_av.isChecked())
+        opts = Options(browser=self.opt_browser.isChecked(), max_pages=self.opt_pages.value(),
+                       depth=self.opt_depth.value(), max_combinations=300 if self.opt_menus.isChecked() else 0,
+                       deep=self.opt_deep.isChecked(), headful=self.opt_headful.isChecked(), av=self.opt_av.isChecked())
         url = self.site_url
         self._job_items = 0
+        self.analysis = None
         self._prep_running("Analysing site")
 
-        if downloading:
-            opts.choose_episodes = None  # set per job below (needs the job context)
+        def work(ctx):
+            from ..pipeline import analyse
+
+            return analyse(url, opts, log=ctx.log, cancel=ctx.cancel, on_stage=ctx.stage)
+
+        self._run_job(work, self._analysis_done, self._job_failed)
+
+    def _analysis_done(self, a) -> None:
+        self.analysis = a
+        self._site_done(a.report, final=False)
+        self._fill_media(a)
+        self.options.set_analyse_mode(False)
+        self.options.set_format(self.settings.value("last_format", "best"))
+        self.options.set_downloads_enabled(True)
+        self.options.btn.setText("  Download selected")
+        self.options.btn.setIcon(icons.icon("download", "#ffffff", 18))
+        self._update_media_sel()
+        self.tabs.setCurrentIndex(0 if a.items else 1)
+        self.show_state("result_site")
+
+    def _start_downloads(self, ids: list[str] | None = None) -> None:
+        a = self.analysis
+        if a is None:
+            return
+        ids = self._media_checked() if ids is None else ids
+        choice = self.options.choice()
+        folder = self.options.folder()
+        self._job_items = len(ids)
+        self._prep_running(f"Downloading {len(ids)} item(s)" if ids else "Saving report")
+        self.overall_lbl.setText(f"{choice.describe()}  →  {folder}")
 
         def work(ctx):
-            from ..pipeline import run
+            from ..pipeline import download_items
 
-            if downloading:
-                opts.choose_episodes = lambda series, labels: ctx.ask("episodes", (series, labels))
-            report, _ = run(url, opts, log=ctx.log, cancel=ctx.cancel, on_progress=ctx.progress, on_stage=ctx.stage)
+            report, _ = download_items(a, ids, folder, choice, log=ctx.log, cancel=ctx.cancel,
+                                       on_progress=ctx.progress, on_stage=ctx.stage)
             return report
 
-        self._run_job(work, self._site_done, self._job_failed)
+        self._run_job(work, lambda rep: self._site_done(rep, final=True), self._job_failed)
 
     def _run_job(self, fn, on_done, on_fail, show_running: bool = True) -> None:
         self.job = Job(fn, self)
         self.job.log.connect(self._log)
         self.job.progress.connect(self._progress)
         self.job.stage.connect(self._stage)
-        self.job.ask.connect(self._answer)
         self.job.done.connect(on_done)
         self.job.failed.connect(on_fail)
         self.job.finished.connect(self._job_finished)
@@ -914,13 +923,6 @@ class GrabPage(QWidget):
         self.inspect_btn.setEnabled(True)
         self.run_spinner.stop()
         self.busy_changed.emit(False)
-
-    def _answer(self, holder: dict) -> None:
-        if holder["kind"] == "episodes":
-            series, labels = holder["payload"]
-            dlg = EpisodePicker(self, series, labels)
-            holder["answer"] = dlg.selected() if dlg.exec() else None
-        holder["event"].set()
 
     def cancel(self) -> None:
         if self.job:
@@ -1021,8 +1023,13 @@ class GrabPage(QWidget):
         self.toast.emit(self.rp_title.text(), OK if n else GOLD)
         QApplication.alert(self.window())
 
-    def _site_done(self, rep: dict) -> None:
+    def _site_done(self, rep: dict, final: bool = True) -> None:
         self.last_result = rep
+        saved = bool(rep.get("run_dir"))
+        self.rs_report.setEnabled(saved)
+        self.rs_folder.setEnabled(saved)
+        if final and self.analysis is not None:
+            self._fill_media(self.analysis, rep)
         s = rep["summary"]
         p = PALETTES[self.mode()]
         vcolor = VERDICT.get(s["piracy_verdict"], MUTED)
@@ -1033,7 +1040,7 @@ class GrabPage(QWidget):
         reasons = rep["piracy"]["reasons"] or ["No piracy indicators found."]
         self.rs_reasons.setText("<br>".join(f"• {r}" for r in reasons[:10]))
         self.t_pages.set(s["pages_analyzed"])
-        self.t_cands.set(s["candidates"])
+        self.t_cands.set(s.get("media_items", s["candidates"]))
         self.t_files.set(s["downloaded_files"])
         self.t_drm.set(s["drm_protected"])
         self.t_sev.set(s["highest_severity"].upper(), SEV.get(s["highest_severity"]))
@@ -1090,13 +1097,94 @@ class GrabPage(QWidget):
             self.cand_tree.addTopLevelItem(it)
         self.res_log.setPlainText(self.log_view.toPlainText())
         self.tabs.setCurrentIndex(0)
-        history.add({"time": time.time(), "url": rep["target"], "kind": "web site", "title": rep["piracy"].get("title", ""),
-                     "files": s["downloaded_files"], "severity": s["highest_severity"], "verdict": s["piracy_verdict"],
-                     "score": s["piracy_score"], "folder": rep["run_dir"],
-                     "report": str(Path(rep["run_dir"]) / "report.html")})
+        if final:
+            history.add({"time": time.time(), "url": rep["target"], "kind": "web site",
+                         "title": rep["piracy"].get("title", ""), "files": s["downloaded_files"],
+                         "severity": s["highest_severity"], "verdict": s["piracy_verdict"], "score": s["piracy_score"],
+                         "folder": rep["run_dir"], "report": str(Path(rep["run_dir"]) / "report.html")})
+            n = s["downloaded_files"]
+            self.toast.emit(f"Saved {n} file(s) and the report" if n else "Report saved", OK)
+        else:
+            self.toast.emit(f"Analysis complete: {s['piracy_verdict'].title()} · {len(rep.get('catalog', []))} "
+                            "media item(s) found", vcolor)
         self.show_state("result_site")
-        self.toast.emit(f"Analysis complete: {s['piracy_verdict'].title()}", vcolor)
         QApplication.alert(self.window())
+
+    # ------------------------------------------------------------------ media catalogue
+    def _fill_media(self, a, rep: dict | None = None) -> None:
+        status = {c["id"]: c for c in (rep or {}).get("catalog", [])}
+        t = self.media_tree
+        t.blockSignals(True)
+        t.clear()
+        groups: dict[str, QTreeWidgetItem] = {}
+        seasons: dict[tuple[str, Any], QTreeWidgetItem] = {}
+        icon_for = {"episode": "play", "movie": "play", "video": "play", "audio": "music"}
+        for it in a.items:
+            g = groups.get(it.group)
+            if g is None:
+                g = QTreeWidgetItem([it.group or "Media", "", ""])
+                g.setFlags(g.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
+                g.setCheckState(0, Qt.Checked)
+                f = g.font(0)
+                f.setBold(True)
+                g.setFont(0, f)
+                t.addTopLevelItem(g)
+                groups[it.group] = g
+            parent = g
+            if it.kind == "episode" and it.season is not None:
+                sk = (it.group, it.season)
+                parent = seasons.get(sk)
+                if parent is None:
+                    parent = QTreeWidgetItem([f"Season {it.season}", "", ""])
+                    parent.setFlags(parent.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
+                    parent.setCheckState(0, Qt.Checked)
+                    g.addChild(parent)
+                    seasons[sk] = parent
+            name = f"Episode {it.episode}" if it.kind == "episode" else it.title
+            src = (f"{len(it.sources)} source(s)" if it.sources else "page, opened at download")
+            st = status.get(it.id, {})
+            state = st.get("status") or ""
+            row = QTreeWidgetItem([name, src, {"downloaded": "✓ saved", "": "", "protected": "protected (one-time tokens)"}.get(state, state)])
+            row.setFlags(row.flags() | Qt.ItemIsUserCheckable)
+            row.setCheckState(0, Qt.Checked if not state else (Qt.Unchecked if state == "downloaded" else Qt.Checked))
+            row.setIcon(0, icons.icon(icon_for.get(it.kind, "play"), MUTED, 16))
+            row.setData(0, Qt.UserRole, it.id)
+            row.setToolTip(1, "\n".join(s.url for s in it.sources[:8]) or it.page)
+            if st.get("files"):
+                row.setData(1, Qt.UserRole, st["files"][0])
+            if state == "downloaded":
+                row.setForeground(2, QBrush(QColor(OK)))
+            elif state:
+                row.setForeground(2, QBrush(QColor(BAD)))
+            parent.addChild(row)
+        for g in groups.values():
+            g.setExpanded(len(a.items) <= 40 or g.childCount() < 10)
+        t.blockSignals(False)
+        t.setVisible(bool(a.items))
+        self.media_empty.setVisible(not a.items)
+        self._update_media_sel()
+
+    def _media_rows(self):
+        stack = [self.media_tree.topLevelItem(i) for i in range(self.media_tree.topLevelItemCount())]
+        while stack:
+            it = stack.pop()
+            if it.data(0, Qt.UserRole):
+                yield it
+            stack.extend(it.child(j) for j in range(it.childCount()))
+
+    def _media_checked(self) -> list[str]:
+        return [r.data(0, Qt.UserRole) for r in self._media_rows() if r.checkState(0) == Qt.Checked]
+
+    def _media_set(self, on: bool) -> None:
+        for i in range(self.media_tree.topLevelItemCount()):
+            self.media_tree.topLevelItem(i).setCheckState(0, Qt.Checked if on else Qt.Unchecked)
+
+    def _update_media_sel(self) -> None:
+        total = sum(1 for _ in self._media_rows())
+        n = len(self._media_checked())
+        self.media_sel.setText(f"{n} of {total} selected")
+        if self.stack.currentWidget() is self.pages["result_site"] or self.analysis is not None:
+            self.options.btn.setEnabled(n > 0)
 
     def _apply_sev_filter(self) -> None:
         sel = self.sev_filter.currentText().lower()
@@ -1105,7 +1193,7 @@ class GrabPage(QWidget):
             it.setHidden(sel != "all severities" and it.data(0, Qt.UserRole) != sel)
 
     def _open_item_file(self, item: QTreeWidgetItem, _col: int) -> None:
-        f = item.data(0, Qt.UserRole)
+        f = item.data(1, Qt.UserRole) if item.treeWidget() is getattr(self, "media_tree", None) else item.data(0, Qt.UserRole)
         if f:
             open_path(Path(f).parent)
 

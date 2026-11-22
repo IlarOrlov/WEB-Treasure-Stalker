@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -40,8 +40,8 @@ class Options:
     av: bool = True
     max_scripts: int = 60
     max_playlist: int = 50
-    # called with (series title, ["Season 1 / Episode 1", ...]); returns the labels to download or None to skip
-    choose_episodes: Any = None
+    # called with the Analysis; returns the catalogue item ids to download (None = nothing)
+    choose_items: Any = None
 
 
 def _save_evidence(pages: list[PageResult], evidence: Path) -> None:
@@ -59,25 +59,15 @@ def _save_evidence(pages: list[PageResult], evidence: Path) -> None:
             (d / f"frame_{j:02d}.html.txt").write_text(f"<!-- {fr['url']} -->\n{fr['html']}")
 
 
-def _series_summary(series: str, found: dict, episodes: dict, downloads: list[dict[str, Any]]) -> dict[str, Any] | None:
-    if not series:
-        return None
-    got: dict[str, list[str]] = {}
-    for d in downloads:
-        if d.get("episode") and d["status"] == "downloaded":
-            got[d["episode"]] = d["files"]
-    seasons: dict[str, list[str]] = {}
-    for k in found:
-        seasons.setdefault(f"Season {k[0]}" if k[0] is not None else "Episodes", []).append(f"Episode {k[1]}")
-    return {"title": series, "episodes_found": len(found), "episodes_selected": len(episodes),
-            "episodes_downloaded": len(got),
-            "missing": [lbl for lbl in (f"Season {k[0]} / Episode {k[1]}" if k[0] is not None else f"Episode {k[1]}"
-                                        for k in episodes) if lbl not in got],
-            "seasons": {s: len(v) for s, v in seasons.items()}}
-
-
 def discover(url: str, opts: Options, evidence: Path, log: Callable[[str], None],
-             cancel=None, stage: Callable[[str, float], None] | None = None) -> tuple[list[PageResult], str | None]:
+             cancel=None, stage: Callable[[str, float], None] | None = None
+             ) -> tuple[list[PageResult], str | None, list[str]]:
+    """Visit the page (and related season pages). Numbered episode pages are only listed ("deferred"):
+    they are opened at download time, except the first one, which is analysed as a sample."""
+    from .episodes import episode_key
+
+    deferred: list[str] = []
+    sample_done = False
     stage = stage or (lambda name, frac: None)
     state = {"page": 0}
 
@@ -92,6 +82,7 @@ def discover(url: str, opts: Options, evidence: Path, log: Callable[[str], None]
     cookie_jar = None
 
     def crawl(analyze: Callable[[str, bool], PageResult]) -> None:
+        nonlocal sample_done
         while queue and len(pages) < opts.max_pages and not (cancel is not None and cancel.is_set()):
             u, depth = queue.pop(0)
             if u in visited:
@@ -99,12 +90,23 @@ def discover(url: str, opts: Options, evidence: Path, log: Callable[[str], None]
             visited.add(u)
             state["page"] += 1
             log(f"[discover] {u}")
-            pg = analyze(u, True)
+            # walk player menus on the start page; on crawled pages only if no episode pages are listed
+            # (then those pages already cover every episode and walking would just repeat work)
+            pg = analyze(u, depth == 0 or (u not in deferred and not deferred))
             pages.append(pg)
             log(f"           {len(pg.candidates)} candidate(s), {len(pg.selections)} selection(s), "
                 f"{len(pg.crawl_links)} episode link(s)")
             if depth < opts.depth:
-                queue.extend((link, depth + 1) for link in pg.crawl_links if link not in visited)
+                for link in pg.crawl_links:
+                    if link in visited or link in deferred:
+                        continue
+                    if episode_key(VideoCandidate(link, "embed", "episode-page", page=link)):
+                        deferred.append(link)  # opened only if the user downloads this episode
+                        if not sample_done:  # analyse one episode page as a sample (players, security)
+                            sample_done = True
+                            queue.append((link, depth + 1))
+                    else:
+                        queue.append((link, depth + 1))
 
     if opts.browser:
         try:
@@ -121,30 +123,49 @@ def discover(url: str, opts: Options, evidence: Path, log: Callable[[str], None]
                 crawl(lambda u, e: fetch_static(u, opts.timeout))
     else:
         crawl(lambda u, e: fetch_static(u, opts.timeout))
-    return pages, cookie_jar
+    return pages, cookie_jar, deferred
 
 
-def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None,
-        on_progress: Callable[[dict], None] | None = None,
-        on_stage: Callable[[str, float], None] | None = None) -> tuple[dict[str, Any], Path]:
+@dataclass
+class Analysis:
+    url: str
+    opts: Options
+    host: str
+    pages: list[PageResult]
+    candidates: list[VideoCandidate]
+    site: dict[str, Any]
+    piracy: dict[str, Any]
+    items: list[Any]  # catalog.MediaItem
+    series: str
+    workdir: Path  # evidence collected during analysis (session temp until saved)
+    cookie_jar: str | None
+    report: dict[str, Any]
+
+
+def analyse(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None,
+            on_stage: Callable[[str, float], None] | None = None) -> Analysis:
+    """Discover all media and scan the site. Downloads nothing; evidence stays in the session temp folder."""
+    from .catalog import build_catalog
+    from .platforms import ytdlp_extractor
+    from .tools import session_temp
+
     stage = on_stage or (lambda name, frac: None)
-    cancelled = lambda: cancel is not None and cancel.is_set()  # noqa: E731
     host = (urlparse(url).hostname or "site").replace(":", "_")
-    run_dir = opts.out / f"{host}_{now_stamp()}"
-    evidence = run_dir / "evidence"
-    qdir = run_dir / "videos"
+    workdir = session_temp() / f"analysis-{now_stamp()}-{abs(hash(url)) % 10_000}"
+    evidence = workdir / "evidence"
     evidence.mkdir(parents=True, exist_ok=True)
 
-    stage("Discovering videos", 0.05)
-    pages, cookie_jar = discover(url, opts, evidence, log, cancel, stage)
+    stage("Discovering media", 0.05)
+    pages, cookie_jar, deferred = discover(url, opts, evidence, log, cancel, stage)
     _save_evidence(pages, evidence)
     candidates = dedupe([c for pg in pages for c in pg.candidates])
     crawled = {pg.url for pg in pages} | {pg.final_url for pg in pages}
     candidates = [c for c in candidates if c.url not in crawled]
     candidates.sort(key=lambda c: KIND_ORDER.get(c.kind, 9))
-    log(f"[discover] {len(candidates)} unique video candidate(s) across {len(pages)} page(s)")
+    log(f"[discover] {len(candidates)} media candidate(s) across {len(pages)} page(s); "
+        f"{len(deferred)} more episode page(s) listed")
 
-    stage("Scanning site security", 0.35)
+    stage("Scanning site security", 0.75)
     log("[site-scan] analysing site security")
     site = scan_site(pages, evidence, timeout=opts.timeout, max_scripts=opts.max_scripts, use_av=opts.av)
     if opts.virustotal:
@@ -153,87 +174,142 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None
         except Exception as exc:  # noqa: BLE001
             site["virustotal"] = {"error": str(exc)}
 
-    # series episodes: <Series>/Season N/Episode MM ---------------------------------
-    from .episodes import episode_path, group_episodes, label_of, series_title
+    items, series = build_catalog(pages, candidates, deferred, host, ytdlp_supported=ytdlp_extractor)
+    eps = [i for i in items if i.kind == "episode"]
+    if eps:
+        log(f"[catalog] series '{series}': {len(eps)} episode(s) in {len({i.season for i in eps})} season(s)")
+    for i in items:
+        if i.kind != "episode":
+            log(f"[catalog] {i.kind}: {i.title} ({len(i.sources)} source(s))")
+    site_piracy = assess_site(pages, candidates + [c for i in items for c in ([] if i.sources else
+                              [VideoCandidate(i.page, "embed", "episode-page", page=i.page)])], site)
+    a = Analysis(url, opts, host, pages, candidates, site, site_piracy, items, series, workdir, cookie_jar, {})
+    a.report = make_report(a, [], None)
+    stage("Analysis complete", 1.0)
+    return a
 
-    episodes, others = group_episodes(candidates)
-    all_episodes = dict(episodes)
-    series = series_title(pages[0].rendered_html or pages[0].raw_html, host) if episodes else ""
-    if episodes:
-        seasons = sorted({k[0] for k in episodes if k[0] is not None})
-        log(f"[episodes] '{series}': {len(episodes)} episode(s) in {len(seasons) or 1} season(s)")
-        if opts.download and opts.choose_episodes is not None:
-            chosen = opts.choose_episodes(series, [label_of(k) for k in episodes])
-            if chosen is None:
-                episodes = {}
-                log("[episodes] episode downloads skipped by user")
-            else:
-                keep = set(chosen)
-                episodes = {k: v for k, v in episodes.items() if label_of(k) in keep}
-                log(f"[episodes] {len(episodes)} episode(s) selected")
 
+def make_report(a: Analysis, downloads: list[dict[str, Any]], run_dir: Path | None) -> dict[str, Any]:
+    all_findings = a.site["findings"] + [f for d in downloads for m in d.get("media", []) for f in m["findings"]]
+    worst = max((sev_rank(f["severity"]) for f in all_findings), default=0)
+    eps = [i for i in a.items if i.kind == "episode"]
+    series = None
+    if eps:
+        seasons: dict[str, int] = {}
+        for i in eps:
+            seasons[f"Season {i.season}" if i.season is not None else "Episodes"] = \
+                seasons.get(f"Season {i.season}" if i.season is not None else "Episodes", 0) + 1
+        chosen = [i for i in eps if i.status]
+        series = {"title": a.series, "episodes_found": len(eps), "episodes_selected": len(chosen),
+                  "episodes_downloaded": sum(i.status == "downloaded" for i in eps),
+                  "missing": [i.label for i in chosen if i.status != "downloaded"], "seasons": seasons}
+    return {
+        "tool": "WEB-Treasure-Stalker", "version": __version__, "target": a.url,
+        "run_dir": str(run_dir) if run_dir else "",
+        "engines": {**engines_status(), "ffprobe": shutil.which("ffprobe") or "not installed"},
+        "summary": {
+            "pages_analyzed": len(a.pages), "candidates": len(a.candidates), "media_items": len(a.items),
+            "downloaded_files": sum(len(d["files"]) for d in downloads),
+            "drm_protected": sum(d["status"] == "drm" for d in downloads),
+            "piracy_verdict": a.piracy["verdict"], "piracy_score": a.piracy["score"],
+            "highest_severity": ["info", "low", "medium", "high", "critical"][worst],
+            "security_findings": len(all_findings),
+        },
+        "series": series,
+        "catalog": [i.to_dict() for i in a.items],
+        "piracy": a.piracy, "site": a.site,
+        "pages": [{"url": p.url, "final_url": p.final_url, "status": p.status, "error": p.error,
+                   "selections": p.selections, "popups": p.popups, "screenshot": p.screenshot} for p in a.pages],
+        "candidates": [c.to_dict() for c in a.candidates], "downloads": downloads,
+    }
+
+
+def _resolve_page(bd: BrowserDiscoverer | None, page: str, log: Callable[[str], None]) -> list[VideoCandidate]:
+    """Open an episode page that was only listed during analysis and capture the stream its player loads."""
+    if bd is None:
+        return [VideoCandidate(page, "embed", "episode-page", referer=page, page=page)]
+    bd.page_budget = 90
+    res = bd.analyze(page, enumerate_episodes=False)
+    found = [c for c in res.candidates if c.kind in ("stream", "direct") and c.source in ("network", "inline-script",
+                                                                                          "video-tag", "video-source")]
+    found.sort(key=lambda c: (0 if c.source == "network" else 1, 0 if c.kind == "stream" else 1))
+    if not found:
+        log(f"           no stream found on {page}")
+    return found or [VideoCandidate(page, "embed", "episode-page", referer=page, page=page)]
+
+
+def download_items(a: Analysis, ids: list[str] | None, folder: Path, choice: Any = None,
+                   log: Callable[[str], None] = print, cancel=None,
+                   on_progress: Callable[[dict], None] | None = None,
+                   on_stage: Callable[[str, float], None] | None = None) -> tuple[dict[str, Any], Path]:
+    """Download the chosen catalogue items into <folder>/<site>_<time>/, scan them, write the full report.
+
+    ids=None downloads everything; an empty list saves only the report and evidence."""
+    stage = on_stage or (lambda name, frac: None)
+    cancelled = lambda: cancel is not None and cancel.is_set()  # noqa: E731
+    opts = a.opts
+    run_dir = Path(folder) / f"{a.host}_{now_stamp()}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(a.workdir / "evidence", run_dir / "evidence", dirs_exist_ok=True)
+    qdir = run_dir / "videos"
+    chosen = [i for i in a.items if ids is None or i.id in ids]
+    for i in a.items:
+        i.status, i.files = "", []
     downloads: list[dict[str, Any]] = []
-    total = len(episodes) + len(others)
-    if opts.download and total:
-        stage("Downloading videos", 0.45)
-        dl = Downloader(qdir, cookiefile=opts.cookies or cookie_jar, cookies_from_browser=opts.cookies_from_browser,
-                        choice=opts.choice, max_playlist=opts.max_playlist, subtitles=opts.subtitles, log=log,
-                        on_progress=on_progress, cancel=cancel, write_info=False)
-        # episodes are de-duplicated by season/episode already; yt-dlp's id-based archive would wrongly treat
-        # different episodes of one player (all with the generic id "hls") as duplicates
-        dl_eps = Downloader(qdir, cookiefile=opts.cookies or cookie_jar, cookies_from_browser=opts.cookies_from_browser,
-                            choice=opts.choice, subtitles=opts.subtitles, log=log, on_progress=on_progress,
-                            cancel=cancel, write_info=False, use_archive=False)
-        n = 0
-        for key, group in episodes.items():
-            if cancelled():
-                log("[download] cancelled")
-                break
-            n += 1
-            label = label_of(key)
-            stage(f"Downloading {label} ({n}/{total})", 0.45 + 0.4 * (n - 1) / total)
-            done = False
-            for cand in group:  # best source first; mirrors and alternatives only if it fails
-                if done or cancelled():
-                    downloads.append({"candidate": cand.to_dict(), "status": "skipped", "files": [], "info": {},
-                                      "episode": label, "error": "episode already downloaded from another source"})
+    if chosen:
+        dl = Downloader(qdir, cookiefile=opts.cookies or a.cookie_jar, cookies_from_browser=opts.cookies_from_browser,
+                        choice=choice or opts.choice, max_playlist=opts.max_playlist, subtitles=opts.subtitles,
+                        log=log, on_progress=on_progress, cancel=cancel, write_info=False, use_archive=False)
+        need_browser = any(not i.sources and i.page for i in chosen) and opts.browser
+        bd_cm = BrowserDiscoverer(run_dir / "evidence", opts.timeout, opts.headful, log=lambda m: None, cancel=cancel) \
+            if need_browser else None
+        bd = None
+        try:
+            if bd_cm is not None:
+                try:
+                    bd = bd_cm.__enter__()
+                except Exception as exc:  # noqa: BLE001
+                    log(f"[download] browser unavailable ({exc}); trying episode pages directly")
+                    bd_cm = None
+            for n, it in enumerate(chosen, 1):
+                if cancelled():
+                    log("[download] cancelled")
+                    break
+                stage(f"Downloading {it.label} ({n}/{len(chosen)})", 0.02 + 0.85 * (n - 1) / len(chosen))
+                sources = it.sources or _resolve_page(bd, it.page, log)
+                sources = sorted(sources, key=lambda c: c.protected)
+                it.status = "error"
+                if sources and all(c.protected for c in sources):
+                    it.status = "protected"
+                    log(f"[download {n}/{len(chosen)}] {it.label}: skipped - the player protects this stream with "
+                        "one-time access tokens; it cannot be downloaded outside the player")
+                    downloads.append({"candidate": sources[0].to_dict(), "status": "protected", "files": [],
+                                      "info": {}, "item": it.id, "error": "stream protected by one-time tokens",
+                                      **({"episode": it.label} if it.kind == "episode" else {})})
                     continue
-                cand.label = label
-                log(f"[download {n}/{total}] {label}: {cand.url[:100]}")
-                r = dl_eps.download(cand, outtmpl=episode_path(series, key))
-                log(f"           -> {r.status}" + (f": {r.error[:150]}" if r.error and r.status != "downloaded" else ""))
-                d = r.to_dict()
-                d["episode"] = label
-                downloads.append(d)
-                done = r.status == "downloaded"
-        covered: set[str] = set()
-        mirrors: set[tuple[str, str]] = set()
-        for cand in others:
-            if cancelled():
-                log("[download] cancelled")
-                break
-            n += 1
-            stage(f"Downloading {n}/{total}", 0.45 + 0.4 * (n - 1) / total)
-            if cand.source == "network" and (cand.label, urlparse(cand.url).path) in mirrors:
-                downloads.append({"candidate": cand.to_dict(), "status": "skipped", "files": [], "info": {},
-                                  "error": "mirror of a stream already downloaded (same path, other host)"})
-                continue
-            if cand.source == "network" and cand.referer in covered:
-                downloads.append({"candidate": cand.to_dict(), "status": "skipped", "files": [], "info": {},
-                                  "error": "stream belongs to an embed that was already downloaded"})
-                continue
-            log(f"[download {n}/{total}] {cand.kind}: {cand.url[:110]}" + (f"  [{cand.label}]" if cand.label else ""))
-            r = dl.download(cand)
-            log(f"           -> {r.status}" + (f" ({len(r.files)} file(s))" if r.files else "") +
-                (f": {r.error[:150]}" if r.error and r.status != "downloaded" else ""))
-            if r.status in ("downloaded", "duplicate"):
-                covered.add(cand.url)
-                if cand.source == "network" and r.status == "downloaded":
-                    mirrors.add((cand.label, urlparse(cand.url).path))
-            downloads.append(r.to_dict())
+                for cand in [c for c in sources if not c.protected]:  # best source first, rest as fallback
+                    if cancelled():
+                        break
+                    cand.label = it.label
+                    log(f"[download {n}/{len(chosen)}] {it.label}: {cand.url[:100]}")
+                    r = dl.download(cand, outtmpl=it.outtmpl or None)
+                    log(f"           -> {r.status}" + (f": {r.error[:150]}" if r.error and r.status != "downloaded" else ""))
+                    d = r.to_dict()
+                    d["item"] = it.id
+                    if it.kind == "episode":
+                        d["episode"] = it.label
+                    downloads.append(d)
+                    if r.status == "downloaded":
+                        it.status, it.files = "downloaded", r.files
+                        break
+                    it.status = r.status
+                if it.status != "downloaded" and any(c.protected for c in sources):
+                    it.status = "protected"  # the working player is token-protected, the alternatives failed
+        finally:
+            if bd_cm is not None:
+                bd_cm.__exit__(None, None, None)
 
-    # media analysis -----------------------------------------------------------
-    stage("Scanning downloaded media", 0.88)
+    stage("Scanning downloaded media", 0.9)
     seen_hashes: dict[str, str] = {}
     for d in downloads:
         d["media"] = []
@@ -253,33 +329,27 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None
                 except Exception as exc:  # noqa: BLE001
                     m["virustotal"] = {"error": str(exc)}
             d["media"].append(m)
-
-    site_piracy = assess_site(pages, candidates, site)
     for d in downloads:
         if d["status"] == "downloaded":
-            d["piracy"] = assess_video(d, d["media"], site_piracy["score"])
-
-    all_findings = site["findings"] + [f for d in downloads for m in d.get("media", []) for f in m["findings"]]
-    worst = max((sev_rank(f["severity"]) for f in all_findings), default=0)
-    report = {
-        "tool": "WEB-Treasure-Stalker", "version": __version__, "target": url, "run_dir": str(run_dir),
-        "engines": {**engines_status(), "ffprobe": shutil.which("ffprobe") or "not installed"},
-        "summary": {
-            "pages_analyzed": len(pages), "candidates": len(candidates),
-            "downloaded_files": sum(len(d["files"]) for d in downloads),
-            "drm_protected": sum(d["status"] == "drm" for d in downloads),
-            "piracy_verdict": site_piracy["verdict"], "piracy_score": site_piracy["score"],
-            "highest_severity": ["info", "low", "medium", "high", "critical"][worst],
-            "security_findings": len(all_findings),
-        },
-        "series": _series_summary(series, all_episodes, episodes, downloads),
-        "piracy": site_piracy, "site": site,
-        "pages": [{"url": p.url, "final_url": p.final_url, "status": p.status, "error": p.error,
-                   "selections": p.selections, "popups": p.popups, "screenshot": p.screenshot} for p in pages],
-        "candidates": [c.to_dict() for c in candidates], "downloads": downloads,
-    }
+            d["piracy"] = assess_video(d, d["media"], a.piracy["score"])
+    report = make_report(a, downloads, run_dir)
     from .report import write_reports
 
     write_reports(report, run_dir)
     stage("Done", 1.0)
     return report, run_dir
+
+
+def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None,
+        on_progress: Callable[[dict], None] | None = None,
+        on_stage: Callable[[str, float], None] | None = None) -> tuple[dict[str, Any], Path]:
+    """analyse -> choose (opts.choose_items, default: everything) -> download into opts.out."""
+    a = analyse(url, opts, log, cancel, on_stage)
+    ids: list[str] | None = None
+    if not opts.download:
+        ids = []
+    elif opts.choose_items is not None:
+        ids = opts.choose_items(a)
+        if ids is None:
+            ids = []
+    return download_items(a, ids, opts.out, opts.choice, log, cancel, on_progress, on_stage)
