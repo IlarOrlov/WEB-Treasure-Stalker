@@ -30,7 +30,9 @@ EXE = ".exe" if IS_WIN else ""
 ProgressCB = Callable[[int, int], None]  # (done_bytes, total_bytes)
 
 
-def data_dir() -> Path:
+def data_dir(create: bool = False) -> Path:
+    """Per-user app folder. Only created when the user asks for something to be stored there
+    (installing a tool, or enabling 'remember preferences and history')."""
     if IS_WIN:
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
         d = base / APP_NAME
@@ -38,13 +40,15 @@ def data_dir() -> Path:
         d = Path.home() / "Library" / "Application Support" / APP_NAME
     else:
         d = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "web-treasure-stalker"
-    d.mkdir(parents=True, exist_ok=True)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def bin_dir() -> Path:
-    d = data_dir() / "bin"
-    d.mkdir(parents=True, exist_ok=True)
+def bin_dir(create: bool = False) -> Path:
+    d = data_dir(create) / "bin"
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -56,16 +60,60 @@ def browsers_dir() -> Path:
     return Path.home() / ".cache" / "ms-playwright"
 
 
+_SESSION_TMP: Path | None = None
+
+
+def session_temp() -> Path:
+    """One private temporary folder for this run of the app. Everything temporary (browser profile, helper
+    caches, intermediate files of child processes) goes here and the folder is deleted when the app exits."""
+    global _SESSION_TMP
+    if _SESSION_TMP is None:
+        import atexit
+        import tempfile
+
+        base = tempfile.gettempdir()
+        _SESSION_TMP = Path(tempfile.mkdtemp(prefix="wts-session-", dir=base))
+        atexit.register(cleanup_session_temp)
+    return _SESSION_TMP
+
+
+def cleanup_session_temp() -> None:
+    global _SESSION_TMP
+    if _SESSION_TMP is not None:
+        shutil.rmtree(_SESSION_TMP, ignore_errors=True)
+        if not _SESSION_TMP.exists():
+            _SESSION_TMP = None
+
+
+_ENV_READY = False
+
+
 def setup_environment() -> None:
-    """Put the app's private bin folder first on PATH and fix the browser location (idempotent)."""
+    """Prepare PATH and redirect every temp/cache location of helper programs into the session temp folder.
+
+    Nothing persistent is created here."""
+    global _ENV_READY
     # PyInstaller's playwright hook sets PLAYWRIGHT_BROWSERS_PATH=0 (inside the temporary bundle); use the
-    # normal per-user cache instead so an installed engine survives restarts and is shared.
+    # normal per-user location so an engine installed from the Tools page is found.
     if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") in (None, "", "0"):
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir())
     b = str(bin_dir())
     parts = os.environ.get("PATH", "").split(os.pathsep)
     if b not in parts:
         os.environ["PATH"] = os.pathsep.join([b] + parts)
+    if _ENV_READY:
+        return
+    _ENV_READY = True
+    import tempfile
+
+    tmp = session_temp()
+    for var in ("TMP", "TEMP", "TMPDIR"):  # child processes (Chromium, ffmpeg, node, deno) inherit this
+        os.environ[var] = str(tmp)
+    tempfile.tempdir = str(tmp)
+    os.environ["DENO_DIR"] = str(tmp / "deno")  # deno would otherwise cache under the user profile
+    os.environ.setdefault("DENO_NO_UPDATE_CHECK", "1")
+    if not IS_WIN:  # generic per-user cache of Linux helper programs (fontconfig, mesa, ...)
+        os.environ["XDG_CACHE_HOME"] = str(tmp / "cache")
 
 
 def _no_window() -> dict:
@@ -186,7 +234,7 @@ def _verify(data: bytes, expected: str | None, name: str) -> None:
 
 
 def _place(name: str, data: bytes) -> Path:
-    dest = bin_dir() / name
+    dest = bin_dir(create=True) / name
     tmp = dest.with_suffix(dest.suffix + ".part")
     tmp.write_bytes(data)
     if not IS_WIN:

@@ -86,7 +86,7 @@ def _probe(url: str, flat: bool, noplaylist: bool = True, extra: dict | None = N
     import yt_dlp
 
     opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": noplaylist,
-            "extract_flat": "in_playlist" if flat else False, **js_runtime_opts(), **(extra or {})}
+            "extract_flat": "in_playlist" if flat else False, "cachedir": False, **js_runtime_opts(), **(extra or {})}
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False) or {}
 
@@ -302,7 +302,7 @@ def _items_spec(items: list[int] | None) -> str | None:
 def download(ins: Inspection, choice: FormatChoice, base: Path, mode: str = "auto", items: list[int] | None = None,
              log: Callable[[str], None] = print, on_progress: Callable[[dict], None] | None = None, cancel=None,
              cookies: str | None = None, cookies_from_browser: str | None = None, scan: bool = True,
-             use_av: bool = True) -> dict[str, Any]:
+             use_av: bool = True, save_report: bool = False) -> dict[str, Any]:
     """Download an inspected link.
 
     mode: 'video' (only the main video), 'playlist' (collection; `items` = 1-based indexes or None for all),
@@ -314,7 +314,7 @@ def download(ins: Inspection, choice: FormatChoice, base: Path, mode: str = "aut
     base = Path(base).expanduser()
     base.mkdir(parents=True, exist_ok=True)
     kw = dict(cookiefile=cookies, cookies_from_browser=cookies_from_browser, choice=choice, write_info=False,
-              use_archive=False, log=log, on_progress=on_progress, cancel=cancel)
+              use_archive=False, quarantine_files=False, log=log, on_progress=on_progress, cancel=cancel)
     downloads: list[dict[str, Any]] = []
     if t.platform == "youtube":
         if mode == "video":
@@ -391,9 +391,10 @@ def download(ins: Inspection, choice: FormatChoice, base: Path, mode: str = "aut
               "destination": str(dest), "downloads": downloads,
               "highest_severity": ["info", "low", "medium", "high", "critical"][worst],
               "downloaded_files": sum(len(d.get("files", [])) for d in downloads)}
-    rdir = dest / ".wts"
-    rdir.mkdir(parents=True, exist_ok=True)
-    (rdir / f"report-{time.strftime('%Y%m%d-%H%M%S')}.json").write_text(json.dumps(report, indent=2, default=str))
+    if save_report:  # only when explicitly requested (CLI --save-report)
+        rdir = dest / ".wts"
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / f"report-{time.strftime('%Y%m%d-%H%M%S')}.json").write_text(json.dumps(report, indent=2, default=str))
     return report
 
 
@@ -401,7 +402,8 @@ def download(ins: Inspection, choice: FormatChoice, base: Path, mode: str = "aut
 
 
 def run_platform(t: Target, prompter: Prompter, log: Callable[[str], None] = print, cookies: str | None = None,
-                 cookies_from_browser: str | None = None, scan: bool = True, use_av: bool = True) -> dict[str, Any]:
+                 cookies_from_browser: str | None = None, scan: bool = True, use_av: bool = True,
+                 save_report: bool = False) -> dict[str, Any]:
     ins = inspect(t)
     empty = {"target": t.url, "platform": t.platform, "kind": t.kind, "message": ins.message, "destination": None,
              "downloads": [], "highest_severity": "info", "downloaded_files": 0}
@@ -441,4 +443,4 @@ def run_platform(t: Target, prompter: Prompter, log: Callable[[str], None] = pri
     choice = prompter.format("mp3" if t.platform == "spotify" else "best")
     log(f"Format: {choice.describe()}  ->  {base}")
     return download(ins, choice, base, mode, items, log=log, cookies=cookies,
-                    cookies_from_browser=cookies_from_browser, scan=scan, use_av=use_av)
+                    cookies_from_browser=cookies_from_browser, scan=scan, use_av=use_av, save_report=save_report)

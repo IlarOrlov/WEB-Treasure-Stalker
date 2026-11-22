@@ -153,10 +153,28 @@ Exit code (site mode): `2` if any high or critical finding, else `0`.
   report.html          human-readable report (verdicts, findings, hashes)
   report.json          everything, machine-readable
   videos/              downloaded media (read-only, non-executable)
-  evidence/            raw + rendered HTML, iframes, network log, scripts, screenshots, session cookies
+  evidence/            raw + rendered HTML, iframes, network log, scripts, screenshots
 ```
 
-Platform mode writes a JSON report to `<download folder>/.wts/`.
+Platform mode saves only the media files. Add `--save-report` (CLI) for a JSON report in `<folder>/.wts/`.
+
+## What the app writes to disk
+
+Nothing is written without your command. In detail:
+
+| When | What, where |
+|---|---|
+| You click **Download** / **Start analysis** | Only inside the folder shown in *Save to*: the media files (YouTube/Spotify; playlists and albums in a sub-folder), or one `<site>_<date-time>` sub-folder for site analysis (videos, report, evidence). Partial files are removed if you cancel. |
+| You click **Install** on the Tools page (asks first, shows the path) | FFmpeg / Deno → `%LOCALAPPDATA%\WEB-Treasure-Stalker\bin` (Linux `~/.local/share/web-treasure-stalker/bin`); Chromium → `%LOCALAPPDATA%\ms-playwright` (Linux `~/.cache/ms-playwright`). |
+| You tick **Remember preferences and history** (History page; off by default) | `prefs.json` and `history.json` in the app folder above. Unticking deletes them. |
+| While the app runs | One private temp folder `%TEMP%\wts-session-*` (browser profile, helper caches, session cookies) plus PyInstaller's own `%TEMP%\_MEI*` unpack folder. **Both are deleted when the app closes.** If the app is force-killed (Task Manager → End task), they stay in `%TEMP%` until Windows or Disk Cleanup removes them. |
+
+Nothing is written to the registry. yt-dlp's cache is disabled. Qt's internal settings and file-dialog state go into the session temp folder,
+and the folder picker is Qt's own, so the Windows "recent folders" lists are not touched.
+(Windows itself keeps general records for any program you run, such as Prefetch. That is outside the app's control.)
+
+You can verify this with Sysinternals **Process Monitor**: filter *Process Name is WEB-Treasure-Stalker.exe*
+and *Operation is WriteFile / CreateFile / RegSetValue*.
 
 ## Safety notes
 

@@ -6,10 +6,10 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QHBoxLayout, QHeaderView, QMessageBox, QProgressBar, QPushButton, QScrollArea,
+from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QHeaderView, QMessageBox, QProgressBar, QPushButton, QScrollArea,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from .. import __version__, history
+from .. import __version__, history, prefs
 from ..tools import bin_dir, status
 from . import icons
 from .grab_page import open_path
@@ -52,10 +52,47 @@ class HistoryPage(QWidget):
         for i in range(6):
             h.setSectionResizeMode(i, QHeaderView.Stretch if i == 1 else QHeaderView.ResizeToContents)
         self.tree.itemDoubleClicked.connect(self._open)
+        store = Card("card2")
+        sl = QHBoxLayout(store)
+        sl.setContentsMargins(16, 12, 16, 12)
+        self.remember = QCheckBox("Remember preferences and history on this computer")
+        self.remember.setChecked(prefs.remembering())
+        self.remember.toggled.connect(self._toggle_remember)
+        self.store_note = label("", "faint", wrap=True)
+        sl.addLayout(vbox(self.remember, self.store_note, spacing=4), 1)
+        lay.addWidget(store)
+        self._update_note()
         lay.addWidget(self.tree, 1)
         self.empty = label("No history yet. Your downloads and scans will appear here.", "muted")
         self.empty.setAlignment(Qt.AlignCenter)
         lay.addWidget(self.empty)
+
+    def _update_note(self) -> None:
+        if prefs.remembering():
+            self.store_note.setText(f"On: saved in {prefs.prefs_file().parent} (prefs.json, history.json). "
+                                    "Turning this off deletes them.")
+        else:
+            self.store_note.setText("Off (default): nothing is saved. Theme, folder and history are forgotten "
+                                    "when you close the app.")
+
+    def _toggle_remember(self, on: bool) -> None:
+        if on:
+            where = prefs.prefs_file().parent
+            if QMessageBox.question(self, "Remember on this computer",
+                                    f"Create the folder\n{where}\nand save your preferences and history there?") \
+                    != QMessageBox.Yes:
+                self.remember.blockSignals(True)
+                self.remember.setChecked(False)
+                self.remember.blockSignals(False)
+                return
+            prefs.enable()
+            history.persist_session()
+        else:
+            removed = prefs.disable()
+            if removed:
+                QMessageBox.information(self, "Deleted", "Deleted:\n" + "\n".join(str(r) for r in removed))
+        self._update_note()
+        self.refresh()
 
     def refresh(self) -> None:
         self.tree.clear()
@@ -187,6 +224,13 @@ class ToolsPage(QWidget):
         from .. import tools
 
         card = self.cards[key]
+        dest = {"ffmpeg": f"{bin_dir()}  (ffmpeg + ffprobe, about 200 MB unpacked)",
+                "js": f"{bin_dir()}  (deno, about 100 MB unpacked)",
+                "browser": f"{tools.browsers_dir()}  (Chromium headless shell, about 250 MB)"}[key]
+        if QMessageBox.question(self, f"Install {card.name.text()}",
+                                f"This downloads {card.name.text()} from its official GitHub release, verifies the "
+                                f"checksum and installs it to:\n\n{dest}\n\nContinue?") != QMessageBox.Yes:
+            return
         card.btn.setEnabled(False)
         card.btn.setText("  Installing…")
         card.bar.show()

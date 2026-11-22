@@ -4,6 +4,8 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import QSettings, QSize, Qt, QTimer
+
+from ..prefs import Settings
 from PySide6.QtGui import QFont, QFontDatabase, QIcon
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QFrame, QHBoxLayout, QMainWindow, QMessageBox, QPushButton,
                                QStackedWidget, QVBoxLayout, QWidget)
@@ -42,7 +44,7 @@ class MainWindow(QMainWindow):
     def __init__(self, app: QApplication):
         super().__init__()
         self.app = app
-        self.settings = QSettings("WEB-Treasure-Stalker", "WEB-Treasure-Stalker")
+        self.settings = Settings()  # memory-only unless the user turns on "remember"
         self.theme = self.settings.value("theme", "dark")
         self.setWindowTitle("WEB-Treasure-Stalker")
         self.setWindowIcon(QIcon(str(ASSETS / "icon.svg")))
@@ -155,6 +157,13 @@ class MainWindow(QMainWindow):
 
 def main() -> int:
     setup_environment()
+    # Qt itself stores small things (e.g. file-dialog state) via QSettings. Keep that out of the registry /
+    # home folder: redirect it into the session temp folder, which is deleted on exit.
+    from ..tools import session_temp
+
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    for scope in (QSettings.UserScope, QSettings.SystemScope):
+        QSettings.setPath(QSettings.IniFormat, scope, str(session_temp() / "qt"))
     if sys.platform == "win32":
         try:
             import ctypes
@@ -177,7 +186,11 @@ def main() -> int:
     app.setWindowIcon(QIcon(str(ASSETS / "icon.svg")))
     win = MainWindow(app)
     win.show()
-    return app.exec()
+    code = app.exec()
+    from ..tools import cleanup_session_temp
+
+    cleanup_session_temp()
+    return code
 
 
 if __name__ == "__main__":

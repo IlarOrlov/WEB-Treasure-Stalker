@@ -83,7 +83,10 @@ def discover(url: str, opts: Options, evidence: Path, log: Callable[[str], None]
             with BrowserDiscoverer(evidence, opts.timeout, opts.headful, max_combinations=opts.max_combinations,
                                    log=log) as bd:
                 crawl(lambda u, e: bd.analyze(u, e))
-                cookie_jar = str(write_cookie_jar(bd.cookies(), evidence / "session-cookies.txt"))
+                from .tools import session_temp
+
+                # session cookies are only needed by the downloader: keep them in the session temp folder
+                cookie_jar = str(write_cookie_jar(bd.cookies(), session_temp() / f"cookies-{now_stamp()}.txt"))
         except Exception as exc:  # noqa: BLE001
             log(f"[discover] browser unavailable ({exc}); falling back to static mode")
             if not pages:
@@ -127,7 +130,7 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None
         stage("Downloading videos", 0.45)
         dl = Downloader(qdir, cookiefile=opts.cookies or cookie_jar, cookies_from_browser=opts.cookies_from_browser,
                         choice=opts.choice, max_playlist=opts.max_playlist, subtitles=opts.subtitles, log=log,
-                        on_progress=on_progress, cancel=cancel)
+                        on_progress=on_progress, cancel=cancel, write_info=False)
         covered: set[str] = set()
         for i, cand in enumerate(candidates, 1):
             if cancelled():

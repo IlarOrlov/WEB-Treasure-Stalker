@@ -51,6 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--cookies-from-browser", metavar="BROWSER", help="reuse cookies from a local browser (chrome, firefox, ...)")
     c.add_argument("--deep", action="store_true", help="fully decode each video with ffmpeg to find malformed streams (slow)")
     c.add_argument("--no-av", action="store_true", help="skip ClamAV/YARA even if installed")
+    c.add_argument("--save-report", action="store_true",
+                   help="YouTube/Spotify: also save a JSON report in <folder>/.wts/ (off by default)")
     c.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return p
 
@@ -74,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         target = classify(url)
         if target is not None:
             report = run_platform(target, prompter, cookies=a.cookies, cookies_from_browser=a.cookies_from_browser,
-                                  use_av=not a.no_av)
+                                  use_av=not a.no_av, save_report=a.save_report)
             n = report["downloaded_files"]
             if n:
                 print(f"\nDone: {n} file(s) in {report['destination']}  (highest media severity: "

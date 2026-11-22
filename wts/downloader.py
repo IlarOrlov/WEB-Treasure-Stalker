@@ -48,6 +48,28 @@ def _safe_label(label: str) -> str:
     return (s[:80] + " - ").replace("%", "%%") if s else ""
 
 
+PARTIAL_RE = re.compile(r"(\.part(-Frag\d+)?|\.ytdl|\.temp(\.\w+)?|\.f\d+\.\w+|-Frag\d+)$", re.I)
+
+
+def _snapshot(root: Path) -> set[Path]:
+    try:
+        return {p for p in root.rglob("*")}
+    except OSError:
+        return set()
+
+
+def _remove_partials(root: Path, before: set[Path]) -> None:
+    """After a cancel or failure, delete the partial/intermediate files this download left behind."""
+    for p in sorted(_snapshot(root) - before, key=lambda x: len(x.parts), reverse=True):
+        try:
+            if p.is_file() and PARTIAL_RE.search(p.name):
+                p.unlink()
+            elif p.is_dir() and not any(p.iterdir()):
+                p.rmdir()
+        except OSError:
+            pass
+
+
 def quarantine(path: Path) -> None:
     """Make downloaded files read-only and non-executable."""
     try:
@@ -71,6 +93,7 @@ class Downloader:
                  choice: FormatChoice | None = None, max_playlist: int = 50, user_agent: str | None = None,
                  subtitles: bool = False, outtmpl: str | None = None, write_info: bool = True,
                  noplaylist: bool = False, playlist_items: str | None = None, use_archive: bool = True,
+                 quarantine_files: bool = True,
                  progress: bool = False, log: Callable[[str], None] = print,
                  on_progress: Callable[[dict], None] | None = None, cancel=None):
         self.dest = dest
@@ -88,8 +111,10 @@ class Downloader:
         self.on_progress = on_progress
         self.cancel = cancel
         self.log = log
-        self.archive = dest / ".download-archive.txt" if use_archive else None
-        dest.mkdir(parents=True, exist_ok=True)
+        # in-memory archive (a set): skips duplicates within this run without writing a file
+        self.archive: set | None = set() if use_archive else None
+        self.quarantine_files = quarantine_files
+        self.dest.mkdir(parents=True, exist_ok=True)
 
     def _opts(self, cand: VideoCandidate, files: list[str], logger: _Logger) -> dict:
         headers = {}
@@ -114,14 +139,15 @@ class Downloader:
             "post_hooks": [files.append],
             "progress_hooks": [self._hook],
             "socket_timeout": 30,
+            "cachedir": False,  # yt-dlp would otherwise keep a cache under the user profile
             **js_runtime_opts(),
             **self.choice.ytdl_opts(),
         }
         if self.playlist_items:
             opts["playlist_items"] = self.playlist_items
             opts.pop("playlistend")
-        if self.archive:
-            opts["download_archive"] = str(self.archive)
+        if self.archive is not None:
+            opts["download_archive"] = self.archive
         if self.cookiefile:
             opts["cookiefile"] = self.cookiefile
         if self.cookies_from_browser:
@@ -148,6 +174,7 @@ class Downloader:
 
         files: list[str] = []
         logger = _Logger(self.log)
+        before = _snapshot(self.dest)
         res = DownloadResult(candidate=cand, status="error")
         try:
             with yt_dlp.YoutubeDL(self._opts(cand, files, logger)) as ydl:
@@ -178,6 +205,9 @@ class Downloader:
             res.files = sorted({f for f in files if os.path.exists(f)})
             if res.files:
                 res.status = "downloaded"
-        for f in res.files:
-            quarantine(Path(f))
+        if res.status != "downloaded":
+            _remove_partials(self.dest, before)
+        if self.quarantine_files:
+            for f in res.files:
+                quarantine(Path(f))
         return res

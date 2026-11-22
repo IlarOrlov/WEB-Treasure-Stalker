@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QSettings, Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
@@ -57,7 +57,7 @@ def default_download_dir() -> str:
 class OptionsBar(Card):
     go = Signal()
 
-    def __init__(self, settings: QSettings):
+    def __init__(self, settings):
         super().__init__("card")
         self.settings = settings
         self.path = QLineEdit(settings.value("download_dir", default_download_dir()))
@@ -93,7 +93,9 @@ class OptionsBar(Card):
         lay.setColumnStretch(0, 1)
 
     def _browse(self):
-        d = QFileDialog.getExistingDirectory(self, "Choose download folder", self.path.text())
+        # Qt's own dialog: the native Windows dialog would record the folder in the registry MRU lists.
+        d = QFileDialog.getExistingDirectory(self, "Choose download folder", self.path.text(),
+                                             QFileDialog.ShowDirsOnly | QFileDialog.DontUseNativeDialog)
         if d:
             self.path.setText(d)
 
@@ -131,7 +133,7 @@ class GrabPage(QWidget):
     request_tools = Signal()
     busy_changed = Signal(bool)
 
-    def __init__(self, settings: QSettings, mode_getter):
+    def __init__(self, settings, mode_getter):
         super().__init__()
         self.setObjectName("page")
         self.settings = settings
@@ -396,6 +398,8 @@ class GrabPage(QWidget):
         g.setColumnStretch(3, 1)
         cl.addLayout(hbox(self.site_mode, None))
         cl.addLayout(g)
+        self.site_writes = label("", "faint", wrap=True)
+        cl.addWidget(self.site_writes)
         cl.addWidget(label("Analyse hostile sites from a disposable VM. The page is rendered in an isolated headless "
                            "browser with downloads, notifications and service workers blocked.", "faint", wrap=True))
         lay.addWidget(card)
@@ -710,6 +714,10 @@ class GrabPage(QWidget):
             st = d.get("status")
             self.site_status.set(f"HTTP {st}", OK if st and st < 400 else GOLD)
         self.site_mode.set_value("download")
+        self.site_writes.setText(
+            "Writes only inside the folder below: a new sub-folder <site>_<date-time> with report.html, report.json, "
+            "evidence (page HTML, scripts, screenshot, network log) and, in download mode, the videos "
+            "(made read-only). Nothing else on disk is touched.")
         self.options.set_format(self.settings.value("last_format", "best"))
         self.options.set_downloads_enabled(True)
         self.options.btn.setEnabled(True)
