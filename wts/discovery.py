@@ -74,6 +74,26 @@ def site_key(url: str) -> str:
     return ".".join(parts[-2:])
 
 
+_SLUG_STOP = {"html", "htm", "php", "watch", "online", "free", "full", "movie", "movies", "film", "films", "serial",
+              "series", "season", "seasons", "episode", "episodes", "sezon", "seriya", "seria", "smotret", "video",
+              "videos", "index", "page", "with", "from", "this", "that", "tvshow", "show", "shows"}
+
+
+def _slug_tokens(url: str) -> set[str]:
+    path = urlparse(url).path.lower()
+    return {t for t in re.split(r"[^0-9a-zа-яё]+", path) if len(t) >= 4 and not t.isdigit() and t not in _SLUG_STOP}
+
+
+def related_episode_link(base_url: str, link: str) -> bool:
+    """Same-site link that is an episode/season page *of the same title* (not 'related' other shows)."""
+    if site_key(link) != site_key(base_url) or not EPISODE_LINK_RE.search(urlparse(link).path + "?" + urlparse(link).query):
+        return False
+    base_path = urlparse(base_url).path.rsplit(".", 1)[0].rstrip("/")
+    if base_path and len(base_path) > 1 and urlparse(link).path.startswith(base_path):
+        return True
+    return bool(_slug_tokens(base_url) & _slug_tokens(link))
+
+
 def classify_url(url: str) -> str:
     if MANIFEST_RE.search(url):
         return "stream"
@@ -161,7 +181,7 @@ def extract_from_html(html: str, base_url: str, label: str = "") -> tuple[list[V
             continue
         if MEDIA_URL_RE.search(full) or PLATFORM_LINK_RE.search(full) or PIRATE_HOST_RE.search(urlparse(full).netloc):
             add(full, "link")
-        elif site_key(full) == base_site and (EPISODE_LINK_RE.search(full) or EPISODE_LINK_RE.search(a.get_text(" ", strip=True))):
+        elif site_key(full) == base_site and related_episode_link(base_url, full):
             links.append(full)
     # Media URLs inside inline scripts / attributes (jwplayer `file:`, JSON configs, ...)
     text = (html or "").replace("\\/", "/")
@@ -244,7 +264,11 @@ _EPISODE_ITEMS_JS = r"""
     // anchors with real navigation targets are crawled instead of clicked
     if (e.tagName === 'A') { const h = e.getAttribute('href') || ''; if (h && !h.startsWith('#') && !h.startsWith('javascript')) return false; }
     // skip containers of other matched items
-    return !e.querySelector(sel);
+    if (e.querySelector(sel)) return false;
+    const t = (e.innerText || e.getAttribute('title') || '').trim();
+    // not an episode/season selector: mark-as-watched, bookmarks, sharing, comments, ...
+    if (/(отметк|просмотрен|mark|watched|bookmark|закладк|подпис|subscribe|избран|favou?rite|like|share|поделит|коммент|comment|report|жалоб|trailer|трейлер|download|скачать|rating|рейтинг)/i.test(t)) return false;
+    return t.length <= 40;
   });
   els.forEach((e, i) => e.setAttribute('data-wts-' + kind, String(i)));
   return els.map(e => (e.innerText || e.getAttribute('title') || e.getAttribute('data-episode') || e.getAttribute('data-season') || '').trim().slice(0, 60));
@@ -254,7 +278,7 @@ _EPISODE_ITEMS_JS = r"""
 _PLAY_SELECTORS = [
     ".vjs-big-play-button", ".jw-icon-playback", ".jw-display-icon-container", ".plyr__control--overlaid",
     ".ytp-large-play-button", "button[aria-label*='play' i]", ".play-button", ".play-btn", "[class*='play-icon']",
-    "#play", ".fp-play", ".mejs__overlay-play", "video",
+    "#play", ".fp-play", ".mejs__overlay-play", "pjsdiv[fid='1']", "video",
 ]
 
 
@@ -263,7 +287,8 @@ class BrowserDiscoverer:
 
     def __init__(self, evidence_dir: Path, timeout: int = 30, headful: bool = False,
                  user_agent: str = DEFAULT_UA, max_combinations: int = 300, max_clicks: int = 200,
-                 log: Callable[[str], None] = print):
+                 log: Callable[[str], None] = print, on_event: Callable[[str], None] | None = None,
+                 page_budget: int = 240, cancel=None):
         self.evidence_dir = evidence_dir
         self.timeout_ms = timeout * 1000
         self.headful = headful
@@ -271,6 +296,11 @@ class BrowserDiscoverer:
         self.max_combinations = max_combinations
         self.max_clicks = max_clicks
         self.log = log
+        self.on_event = on_event
+        self.page_budget = page_budget
+        self.cancel = cancel
+        self._deadline = 0.0
+        self._budget_noted = False
         self._pw = self._browser = self._ctx = None
         self._label = ""
         self._res: PageResult | None = None
@@ -384,7 +414,31 @@ class BrowserDiscoverer:
         except Exception:  # noqa: BLE001
             pass
 
+    def _click_player_frames(self, page) -> None:
+        """Most embedded players start on a click in their centre: click every visible player-sized iframe."""
+        try:
+            boxes = page.main_frame.evaluate("""() => Array.from(document.querySelectorAll('iframe')).map(f => {
+                const r = f.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })
+                .filter(b => b[2] >= 240 && b[3] >= 135)""")
+        except Exception:  # noqa: BLE001
+            return
+        for x, y, w, h in boxes[:4]:
+            try:
+                page.mouse.wheel(0, y - 200)
+                page.wait_for_timeout(300)
+                b = page.main_frame.evaluate("""([w, h]) => { const f = Array.from(document.querySelectorAll('iframe'))
+                    .find(f => { const r = f.getBoundingClientRect(); return Math.abs(r.width - w) < 2 && Math.abs(r.height - h) < 2; });
+                    if (!f) return null; const r = f.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }""",
+                                             [w, h])
+                if b:
+                    page.mouse.click(b[0], b[1])
+                    page.wait_for_timeout(1500)
+                    self._reap_popups()
+            except Exception:  # noqa: BLE001
+                continue
+
     def _try_play(self, page) -> None:
+        self._click_player_frames(page)
         for frame in page.frames:
             for sel in _PLAY_SELECTORS:
                 try:
@@ -428,9 +482,39 @@ class BrowserDiscoverer:
                 if _http_url(s):
                     res.candidates.append(VideoCandidate(s, classify_url(s), "video-element", furl, label, res.url))
 
+    def _event(self, msg: str) -> None:
+        if self.on_event:
+            n = len(dedupe(self._res.candidates)) if self._res else 0
+            self.on_event(f"{msg}  ·  {n} video candidate(s) so far")
+
+    def _stop(self) -> bool:
+        if self.cancel is not None and self.cancel.is_set():
+            return True
+        if time.monotonic() > self._deadline:
+            if not self._budget_noted:
+                self._budget_noted = True
+                self.log(f"  page time limit ({self.page_budget}s) reached; moving on")
+            return True
+        return False
+
+    def _load_lazy_frames(self, page) -> None:
+        """Lazy players keep their URL in data-src until scrolled into view: load them now."""
+        try:
+            n = page.main_frame.evaluate("""() => {
+                let n = 0;
+                document.querySelectorAll('iframe').forEach(f => {
+                  const d = f.dataset.src || f.dataset.lazySrc || f.getAttribute('data-original');
+                  if (d && (!f.getAttribute('src') || f.src === 'about:blank')) { f.src = d; n++; }
+                });
+                window.scrollTo(0, document.body.scrollHeight); return n; }""")
+        except Exception:  # noqa: BLE001
+            n = 0
+        if n:
+            self._settle(page, 8000)
+
     # season / episode enumeration -------------------------------------------
     def _walk_selects(self, page, labels: list[str], used: set[str]) -> None:
-        if self._combos >= self.max_combinations:
+        if self._combos >= self.max_combinations or self._stop():
             return
         try:
             selects = [s for s in page.main_frame.evaluate(_RELEVANT_SELECTS_JS, SELECT_KW) if s["key"] not in used]
@@ -451,11 +535,12 @@ class BrowserDiscoverer:
             return
         word = sel["word"].strip().title()
         for opt in options:
-            if self._combos >= self.max_combinations:
+            if self._combos >= self.max_combinations or self._stop():
                 break
             text = opt["text"] or opt["value"]
             part = f"{word} {text}" if word and text.isdigit() else text
             self._label = " / ".join(labels + [part])
+            self._event(f"Trying {self._label}")
             try:
                 page.locator(sel["key"]).first.select_option(value=opt["value"], timeout=5000)
             except Exception:  # noqa: BLE001
@@ -470,10 +555,11 @@ class BrowserDiscoverer:
             return 0
         clicked = 0
         for i, name in enumerate(names):
-            if self._combos >= self.max_clicks:
+            if self._combos >= self.max_clicks or self._stop():
                 break
             label = (prefix + " / " if prefix else "") + (name or f"{kind} {i + 1}")
             self._label = label
+            self._event(f"Trying {label}")
             try:
                 page.locator(f"[data-wts-{kind}='{i}']").first.click(timeout=3000, no_wait_after=True)
             except Exception:  # noqa: BLE001
@@ -494,6 +580,8 @@ class BrowserDiscoverer:
         res = self._res = PageResult(url=url)
         self._label = ""
         self._combos = 0
+        self._deadline = time.monotonic() + self.page_budget
+        self._budget_noted = False
         self._page_no += 1
         page = self._main_page = self._ctx.new_page()
         self._main_url = url
@@ -517,8 +605,12 @@ class BrowserDiscoverer:
                 except Exception:  # noqa: BLE001
                     pass
             self._main_url = page.url
+            self._event("Loading page")
             self._settle(page)
             res.final_url = page.url
+            self._event("Loading embedded players")
+            self._load_lazy_frames(page)
+            self._event("Starting players")
             self._try_play(page)
             self._harvest(page, "")
             if enumerate_episodes:

@@ -17,6 +17,9 @@ PIRATE_VIDEO_HOSTS = [
     "mcloud", "filelions", "vidhide", "streamhide", "lulustream", "vtube", "vtbe", "supervideo",
     "dropload", "vidguard", "listeamed", "bembed", "vembed", "gogocdn", "gogo-stream",
     "goload", "playtaku", "anihdplay", "streamvid", "voe.", "mxdrop", "turboviplay", "emturbovid",
+    # CIS "balancer" player networks used by unlicensed streaming portals
+    "cinemar.cc", "cinemap.cc", "kodik", "aniqit", "alloha", "collaps", "apicollaps", "videocdn", "ashdi",
+    "hdvb", "vb17", "voidboost", "bazon", "lumex", "vibix", "cdnmovies", "kinobox", "videoframe", "zetvideo",
 ]
 
 # Domain keywords typical of piracy portals.
@@ -27,7 +30,8 @@ PIRATE_DOMAIN_RE = re.compile(
     r"freestream|streamfree|bflix|cuevana|pelisplus|seriesflix|watchfree|freemovie|moviesjoy|"
     r"movie4k|losmovies|vumoo|popcornflix-free|tinyzone|zoechip|braflix|hianime|animepahe|"
     r"series9|watchcartoon|wcostream|projectfreetv|tubi-free|vidsrc|nunflix|flixhq|showbox|"
-    r"sratim|watchsomuch)",
+    r"sratim|watchsomuch|kinogo|hdrezka|rezka\.|lordfilm|lordserial|filmix|seasonvar|kinokrad|baskino|zetflix|"
+    r"kinovod|kinoprostor|kinozal|rutor|kinokong|kinogb|gidonline|hdkinoteatr|kinotochka|anwap)",
     re.I,
 )
 
@@ -90,6 +94,9 @@ PIRACY_PAGE_PHRASES = [
     (re.compile(r"\b(123movies|putlocker|fmovies|soap2day|gomovies|solarmovie)\b", re.I), 15,
      "mentions well-known piracy brand"),
     (re.compile(r"magnet:\?xt=urn:btih:|\.torrent\b", re.I), 20, "torrent / magnet links present"),
+    (re.compile(r"смотреть\s+(онлайн\s+)?бесплатно|бесплатно\s+(онлайн|в\s+хорошем\s+качестве)|"
+                r"все\s+серии\s+(подряд|онлайн)|без\s+регистрации|в\s+хорошем\s+качестве\s+hd", re.I), 15,
+     "Russian free-streaming phrases"),
     (re.compile(r"(צפייה|לצפייה)\s+ישירה|סרטים\s+(מתורגמים|לצפייה)\s+(בחינם|ישירה)|ללא\s+הרשמה", re.I), 15,
      "Hebrew free-streaming phrases"),
 ]

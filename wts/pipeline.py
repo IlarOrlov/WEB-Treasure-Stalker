@@ -58,7 +58,15 @@ def _save_evidence(pages: list[PageResult], evidence: Path) -> None:
 
 
 def discover(url: str, opts: Options, evidence: Path, log: Callable[[str], None],
-             cancel=None) -> tuple[list[PageResult], str | None]:
+             cancel=None, stage: Callable[[str, float], None] | None = None) -> tuple[list[PageResult], str | None]:
+    stage = stage or (lambda name, frac: None)
+    state = {"page": 0}
+
+    def on_event(msg: str) -> None:
+        total = max(1, min(opts.max_pages, state["page"] + len(queue)))
+        frac = 0.05 + 0.28 * min(1.0, (state["page"] - 1) / total)
+        stage(f"Page {state['page']}/{total}: {msg}", frac)
+
     pages: list[PageResult] = []
     queue: list[tuple[str, int]] = [(url, 0)]
     visited: set[str] = set()
@@ -70,6 +78,7 @@ def discover(url: str, opts: Options, evidence: Path, log: Callable[[str], None]
             if u in visited:
                 continue
             visited.add(u)
+            state["page"] += 1
             log(f"[discover] {u}")
             pg = analyze(u, True)
             pages.append(pg)
@@ -81,7 +90,7 @@ def discover(url: str, opts: Options, evidence: Path, log: Callable[[str], None]
     if opts.browser:
         try:
             with BrowserDiscoverer(evidence, opts.timeout, opts.headful, max_combinations=opts.max_combinations,
-                                   log=log) as bd:
+                                   log=log, on_event=on_event, cancel=cancel) as bd:
                 crawl(lambda u, e: bd.analyze(u, e))
                 from .tools import session_temp
 
@@ -108,7 +117,7 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None
     evidence.mkdir(parents=True, exist_ok=True)
 
     stage("Discovering videos", 0.05)
-    pages, cookie_jar = discover(url, opts, evidence, log, cancel)
+    pages, cookie_jar = discover(url, opts, evidence, log, cancel, stage)
     _save_evidence(pages, evidence)
     candidates = dedupe([c for pg in pages for c in pg.candidates])
     crawled = {pg.url for pg in pages} | {pg.final_url for pg in pages}
@@ -147,6 +156,8 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None
                 (f": {r.error[:150]}" if r.error and r.status != "downloaded" else ""))
             if r.status in ("downloaded", "duplicate"):
                 covered.add(cand.url)
+                if cand.source == "network" and r.status == "downloaded" and cand.referer:
+                    covered.add(cand.referer)  # mirrors of the same player stream are skipped
             downloads.append(r.to_dict())
 
     # media analysis -----------------------------------------------------------
