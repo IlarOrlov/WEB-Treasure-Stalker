@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Watch Free Movie 2024 1080p WEBRip - Full Episodes Online</title>
+  <!-- TEST FIXTURE: deliberately "malicious" markup for the scanner. The .invalid TLD never resolves. -->
+  <script src="https://cdn.popads.net.invalid/pop.js"></script>
+</head>
+<body>
+  <h1>Test series – watch free online</h1>
+  <p>Disclaimer: this site does not store any files on its server. All contents are provided by non-affiliated third parties.</p>
+
+  <!-- trailer: plain video tag -->
+  <video controls src="/media/clip1.mp4"></video>
+
+  <!-- third-party style player -->
+  <iframe src="/embed.html" width="640" height="360"></iframe>
+
+  <!-- planted malicious indicators -->
+  <iframe src="/tracker.html" width="0" height="0" style="display:none"></iframe>
+  <a href="/download/HD-Player-setup.exe">Download HD player to watch</a>
+  <p>Please update your video player to continue.</p>
+  <script>var x = "Y29uc29sZS5sb2coMSk="; eval(atob(x));</script>
+
+  <!-- season / episode selectors -->
+  <label for="season">Season</label>
+  <select id="season">
+    <option value="">Select season</option>
+    <option value="1">1</option>
+    <option value="2">2</option>
+  </select>
+  <label for="episode">Episode</label>
+  <select id="episode"><option value="">Select episode</option></select>
+  <div id="player"></div>
+
+  <script>
+    const EPISODES = {"1": ["s1e1", "s1e2"], "2": ["s2e1"]};
+    const season = document.getElementById("season");
+    const episode = document.getElementById("episode");
+    const player = document.getElementById("player");
+    season.addEventListener("change", () => {
+      episode.innerHTML = '<option value="">Select episode</option>';
+      (EPISODES[season.value] || []).forEach((id, i) => {
+        const o = document.createElement("option");
+        o.value = id; o.text = String(i + 1);
+        episode.appendChild(o);
+      });
+    });
+    episode.addEventListener("change", () => {
+      if (!episode.value) return;
+      player.innerHTML = "";
+      const v = document.createElement("video");
+      v.src = "/media/" + episode.value + ".mp4";
+      v.preload = "auto";
+      player.appendChild(v);
+    });
+  </script>
+</body>
+</html>
