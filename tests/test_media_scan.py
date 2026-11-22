@@ -1,5 +1,8 @@
 import shutil
+import sys
 import zipfile
+
+import pytest
 from pathlib import Path
 
 from wts.media_scan import mp4_end, scan_media, sniff
@@ -31,6 +34,7 @@ def test_appended_zip_is_critical(clip, tmp_path):
     assert end == clip.stat().st_size
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows Defender quarantines the EICAR test file")
 def test_eicar_inside_media_is_flagged(clip, tmp_path):
     bad = tmp_path / "eicar.mp4"
     data = clip.read_bytes()

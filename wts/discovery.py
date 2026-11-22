@@ -284,10 +284,16 @@ class BrowserDiscoverer:
         from playwright.sync_api import sync_playwright
 
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(
-            headless=not self.headful,
-            args=["--autoplay-policy=no-user-gesture-required", "--mute-audio", "--disable-notifications"],
-        )
+        from .tools import launch_chromium
+
+        try:
+            self._browser = launch_chromium(
+                self._pw, headless=not self.headful,
+                args=["--autoplay-policy=no-user-gesture-required", "--mute-audio", "--disable-notifications"],
+            )
+        except Exception:
+            self._pw.stop()
+            raise
         self._ctx = self._browser.new_context(
             accept_downloads=False, user_agent=self.user_agent, ignore_https_errors=True,
             service_workers="block", viewport={"width": 1366, "height": 900},

@@ -9,3 +9,6 @@ downloads/
 *.webm
 *.mp3
 *.m4a
+build/
+dist/
+*.spec.bak

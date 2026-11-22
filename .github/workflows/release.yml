@@ -1,0 +1,103 @@
+name: Build & release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04        # older glibc = runs on more Linux distributions
+            asset: WEB-Treasure-Stalker-linux-x64
+          - os: windows-latest
+            asset: WEB-Treasure-Stalker-windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libegl1 libgl1
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" "yt-dlp[default]" pyside6-essentials pyinstaller
+
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: Build single-file executable
+        run: pyinstaller packaging/wts.spec --noconfirm --distpath dist --workpath build
+
+      - name: Rename & smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mv dist/WEB-Treasure-Stalker "dist/${{ matrix.asset }}"
+          chmod +x "dist/${{ matrix.asset }}"
+          "dist/${{ matrix.asset }}" --version
+          "dist/${{ matrix.asset }}" --check-tools
+          QT_QPA_PLATFORM=offscreen timeout 20 "dist/${{ matrix.asset }}" || [ $? -eq 124 ]
+
+      - name: Rename & smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Move-Item dist/WEB-Treasure-Stalker.exe "dist/${{ matrix.asset }}"
+          $p = Start-Process -FilePath "dist/${{ matrix.asset }}" -ArgumentList "--version" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "smoke test failed: exit $($p.ExitCode)" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Checksums
+        run: cd assets && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          body: |
+            ## WEB-Treasure-Stalker ${{ github.ref_name }}
+
+            Single-file desktop app for Linux and Windows. Download it and run it; no install needed.
+
+            | Platform | File |
+            |---|---|
+            | Windows 10/11 (x64) | `WEB-Treasure-Stalker-windows-x64.exe` |
+            | Linux (x64, glibc ≥ 2.35) | `WEB-Treasure-Stalker-linux-x64` (run `chmod +x` first) |
+
+            **First run:** open **Tools** and click *Install* for FFmpeg (needed for best-quality merges and
+            format conversion) and the Chromium engine (needed for full web-site analysis). Downloads are
+            checksum-verified. Tools already on your system are detected automatically.
+
+            Run without arguments to open the GUI. Run with arguments to use the CLI
+            (e.g. `WEB-Treasure-Stalker <url> -y -p <folder> -f mp4`, or `--help`).
+
+            Windows SmartScreen may warn because the executable is not code-signed. Choose *More info → Run anyway*.
+            Verify the file against `SHA256SUMS.txt`.

@@ -57,14 +57,15 @@ def _save_evidence(pages: list[PageResult], evidence: Path) -> None:
             (d / f"frame_{j:02d}.html.txt").write_text(f"<!-- {fr['url']} -->\n{fr['html']}")
 
 
-def discover(url: str, opts: Options, evidence: Path, log: Callable[[str], None]) -> tuple[list[PageResult], str | None]:
+def discover(url: str, opts: Options, evidence: Path, log: Callable[[str], None],
+             cancel=None) -> tuple[list[PageResult], str | None]:
     pages: list[PageResult] = []
     queue: list[tuple[str, int]] = [(url, 0)]
     visited: set[str] = set()
     cookie_jar = None
 
     def crawl(analyze: Callable[[str, bool], PageResult]) -> None:
-        while queue and len(pages) < opts.max_pages:
+        while queue and len(pages) < opts.max_pages and not (cancel is not None and cancel.is_set()):
             u, depth = queue.pop(0)
             if u in visited:
                 continue
@@ -92,14 +93,19 @@ def discover(url: str, opts: Options, evidence: Path, log: Callable[[str], None]
     return pages, cookie_jar
 
 
-def run(url: str, opts: Options, log: Callable[[str], None] = print) -> tuple[dict[str, Any], Path]:
+def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None,
+        on_progress: Callable[[dict], None] | None = None,
+        on_stage: Callable[[str, float], None] | None = None) -> tuple[dict[str, Any], Path]:
+    stage = on_stage or (lambda name, frac: None)
+    cancelled = lambda: cancel is not None and cancel.is_set()  # noqa: E731
     host = (urlparse(url).hostname or "site").replace(":", "_")
     run_dir = opts.out / f"{host}_{now_stamp()}"
     evidence = run_dir / "evidence"
     qdir = run_dir / "videos"
     evidence.mkdir(parents=True, exist_ok=True)
 
-    pages, cookie_jar = discover(url, opts, evidence, log)
+    stage("Discovering videos", 0.05)
+    pages, cookie_jar = discover(url, opts, evidence, log, cancel)
     _save_evidence(pages, evidence)
     candidates = dedupe([c for pg in pages for c in pg.candidates])
     crawled = {pg.url for pg in pages} | {pg.final_url for pg in pages}
@@ -107,6 +113,7 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print) -> tuple[di
     candidates.sort(key=lambda c: KIND_ORDER.get(c.kind, 9))
     log(f"[discover] {len(candidates)} unique video candidate(s) across {len(pages)} page(s)")
 
+    stage("Scanning site security", 0.35)
     log("[site-scan] analysing site security")
     site = scan_site(pages, evidence, timeout=opts.timeout, max_scripts=opts.max_scripts, use_av=opts.av)
     if opts.virustotal:
@@ -117,10 +124,16 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print) -> tuple[di
 
     downloads: list[dict[str, Any]] = []
     if opts.download and candidates:
+        stage("Downloading videos", 0.45)
         dl = Downloader(qdir, cookiefile=opts.cookies or cookie_jar, cookies_from_browser=opts.cookies_from_browser,
-                        choice=opts.choice, max_playlist=opts.max_playlist, subtitles=opts.subtitles, log=log)
+                        choice=opts.choice, max_playlist=opts.max_playlist, subtitles=opts.subtitles, log=log,
+                        on_progress=on_progress, cancel=cancel)
         covered: set[str] = set()
         for i, cand in enumerate(candidates, 1):
+            if cancelled():
+                log("[download] cancelled")
+                break
+            stage(f"Downloading {i}/{len(candidates)}", 0.45 + 0.4 * (i - 1) / len(candidates))
             if cand.source == "network" and cand.referer in covered:
                 downloads.append({"candidate": cand.to_dict(), "status": "skipped", "files": [], "info": {},
                                   "error": "stream belongs to an embed that was already downloaded"})
@@ -134,6 +147,7 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print) -> tuple[di
             downloads.append(r.to_dict())
 
     # media analysis -----------------------------------------------------------
+    stage("Scanning downloaded media", 0.88)
     seen_hashes: dict[str, str] = {}
     for d in downloads:
         d["media"] = []
@@ -180,4 +194,5 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print) -> tuple[di
     from .report import write_reports
 
     write_reports(report, run_dir)
+    stage("Done", 1.0)
     return report, run_dir

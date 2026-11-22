@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
@@ -113,86 +113,6 @@ def _print_items(entries: list[dict[str, Any]], log: Callable[[str], None], limi
 # --------------------------------------------------------------------------- YouTube
 
 
-@dataclass
-class PlatformRun:
-    downloads: list[dict[str, Any]]
-    dest: Path | None
-    message: str = ""
-
-
-def _download(urls_labels: list[tuple[str, str]], dest: Path, choice: FormatChoice, outtmpl: str,
-              log: Callable[[str], None], cookies: str | None, cookies_from_browser: str | None,
-              playlist_items: str | None = None, noplaylist: bool = True, max_playlist: int = 10_000) -> list[dict]:
-    dl = Downloader(dest, cookiefile=cookies, cookies_from_browser=cookies_from_browser, choice=choice,
-                    outtmpl=outtmpl, write_info=False, noplaylist=noplaylist, playlist_items=playlist_items,
-                    use_archive=False, max_playlist=max_playlist, log=log)
-    out = []
-    for n, (url, label) in enumerate(urls_labels, 1):
-        prefix = f"[{n}/{len(urls_labels)}] " if len(urls_labels) > 1 else ""
-        log(f"{prefix}downloading {label or url}")
-        r = dl.download(VideoCandidate(url=url, kind="platform-link", source="user", label=label))
-        log(f"{' ' * len(prefix)}-> {r.status}" + (f": {', '.join(Path(f).name for f in r.files)}" if r.files else "")
-            + (f" ({r.error[:200]})" if r.error and r.status != "downloaded" else ""))
-        out.append(r.to_dict())
-    return out
-
-
-def handle_youtube(t: Target, prompter: Prompter, log: Callable[[str], None], cookies: str | None = None,
-                   cookies_from_browser: str | None = None) -> PlatformRun:
-    if t.kind == "other":
-        return PlatformRun([], None, "This YouTube page has no main video (channel, home, search or feed page). "
-                                     "Nothing was downloaded. Pass a video (watch/shorts/youtu.be) or playlist link.")
-    mode = "video" if t.kind == "video" else "playlist"
-    if t.kind == "video-in-playlist":
-        mode = prompter.choice("This video is part of a playlist. What should be downloaded?",
-                               [("video", "Only this video"), ("playlist", "The whole playlist"),
-                                ("select", "Choose specific playlist items")],
-                               "select" if prompter.preset_items else "video")
-    if mode == "video":
-        video_url = f"https://www.youtube.com/watch?v={t.id}"
-        try:
-            info = _probe(video_url, flat=False)
-        except Exception as exc:  # noqa: BLE001
-            return PlatformRun([], None, f"No downloadable main video on this page: {_clean_err(exc)}. Nothing was downloaded.")
-        if info.get("is_live"):
-            log("note: this is a live stream; it will be recorded from now until it ends or you press Ctrl+C")
-        log(f"Video : {info.get('title')}  [{_fmt_dur(info.get('duration'))}]  by {info.get('uploader') or info.get('channel')}")
-        log(f"Best  : {info.get('height') or '?'}p {info.get('vcodec') or ''} + {info.get('acodec') or ''}")
-        dest = prompter.path("~/Downloads/WTS")
-        choice = prompter.format("best")
-        log(f"Format: {choice.describe()}  ->  {dest}")
-        return PlatformRun(_download([(video_url, info.get("title", ""))], dest, choice,
-                                     "%(title).150B [%(id)s].%(ext)s", log, cookies, cookies_from_browser), dest)
-
-    pl_url = f"https://www.youtube.com/playlist?list={t.list_id}"
-    try:
-        info = _probe(pl_url, flat=True, noplaylist=False)
-    except Exception as exc:  # noqa: BLE001
-        return PlatformRun([], None, f"Playlist could not be read: {_clean_err(exc)}. Nothing was downloaded.")
-    entries = [e for e in (info.get("entries") or []) if e]
-    if not entries:
-        return PlatformRun([], None, "The playlist is empty or private. Nothing was downloaded.")
-    log(f"Playlist: {info.get('title')}  ({len(entries)} items, by {info.get('uploader') or info.get('channel') or '?'})")
-    _print_items(entries, log)
-    items = None
-    if mode == "select" or (mode == "playlist" and t.kind == "playlist"):
-        items = prompter.items(len(entries), "all")
-    chosen = expand_items(items, len(entries))
-    log(f"Selected {len(chosen)} of {len(entries)} item(s)")
-    base = prompter.path("~/Downloads/WTS")
-    dest = base / safe_name(info.get("title") or t.list_id, "playlist")
-    dest.mkdir(parents=True, exist_ok=True)
-    choice = prompter.format("best")
-    log(f"Format: {choice.describe()}  ->  {dest}")
-    downloads = _download([(pl_url, info.get("title", ""))], dest, choice,
-                          "%(playlist_index)03d - %(title).150B [%(id)s].%(ext)s", log, cookies, cookies_from_browser,
-                          playlist_items=items, noplaylist=False)
-    return PlatformRun(downloads, dest)
-
-
-# --------------------------------------------------------------------------- Spotify
-
-
 def spotify_metadata(kind: str, sid: str, timeout: int = 20) -> dict[str, Any]:
     """Read title/artists/durations from Spotify's public embed page (no API key)."""
     r = requests.get(f"https://open.spotify.com/embed/{kind}/{sid}", headers={"User-Agent": DEFAULT_UA}, timeout=timeout)
@@ -247,85 +167,278 @@ def match_on_youtube(track: dict[str, Any], log: Callable[[str], None]) -> dict[
             "duration": best.get("duration"), "channel": best.get("channel") or best.get("uploader")}
 
 
-def handle_spotify(t: Target, prompter: Prompter, log: Callable[[str], None], cookies: str | None = None,
-                   cookies_from_browser: str | None = None) -> PlatformRun:
+
+
+# --------------------------------------------------------------------------- inspection
+
+
+@dataclass
+class Inspection:
+    target: Target
+    ok: bool
+    message: str = ""
+    title: str = ""
+    uploader: str = ""
+    duration: float | None = None
+    thumbnail: str = ""
+    quality: str = ""
+    is_live: bool = False
+    video_url: str = ""
+    playlist_url: str = ""
+    playlist_title: str = ""
+    entries: list[dict[str, Any]] = field(default_factory=list)  # {title, duration, artists?}
+
+    @property
+    def is_collection(self) -> bool:
+        return bool(self.entries) and (self.target.kind in ("playlist", "album") or self.target.kind == "video-in-playlist")
+
+
+def inspect(t: Target, log: Callable[[str], None] = lambda m: None) -> Inspection:
+    """Read what a YouTube/Spotify link contains without downloading anything."""
+    if t.platform == "youtube":
+        return _inspect_youtube(t)
+    return _inspect_spotify(t)
+
+
+def _inspect_youtube(t: Target) -> Inspection:
+    ins = Inspection(t, ok=False)
+    if t.kind == "other":
+        ins.message = ("This YouTube page has no main video (channel, home, search or feed page). "
+                       "Nothing will be downloaded. Use a video (watch/shorts/youtu.be) or playlist link.")
+        return ins
+    if t.kind in ("video", "video-in-playlist"):
+        ins.video_url = f"https://www.youtube.com/watch?v={t.id}"
+        try:
+            info = _probe(ins.video_url, flat=False)
+        except Exception as exc:  # noqa: BLE001
+            if t.kind == "video":
+                ins.message = f"No downloadable main video on this page: {_clean_err(exc)}. Nothing will be downloaded."
+                return ins
+            info = {}
+        ins.title = info.get("title") or ""
+        ins.uploader = info.get("uploader") or info.get("channel") or ""
+        ins.duration = info.get("duration")
+        ins.thumbnail = info.get("thumbnail") or ""
+        ins.is_live = bool(info.get("is_live"))
+        if info:
+            fps = f"{int(info['fps'])}fps " if info.get("fps") else ""
+            ins.quality = f"{info.get('height') or '?'}p {fps}· {info.get('vcodec') or '?'} + {info.get('acodec') or '?'}"
+    if t.kind in ("playlist", "video-in-playlist"):
+        ins.playlist_url = f"https://www.youtube.com/playlist?list={t.list_id}"
+        try:
+            pl = _probe(ins.playlist_url, flat=True, noplaylist=False)
+        except Exception as exc:  # noqa: BLE001
+            if t.kind == "playlist":
+                ins.message = f"Playlist could not be read: {_clean_err(exc)}. Nothing will be downloaded."
+                return ins
+            pl = {}
+        ins.playlist_title = pl.get("title") or ""
+        ins.entries = [{"title": e.get("title") or e.get("id") or "?", "duration": e.get("duration"),
+                        "id": e.get("id"), "uploader": e.get("channel") or e.get("uploader") or ""}
+                       for e in (pl.get("entries") or []) if e]
+        if t.kind == "playlist":
+            if not ins.entries:
+                ins.message = "The playlist is empty or private. Nothing will be downloaded."
+                return ins
+            ins.title = ins.playlist_title
+            ins.uploader = pl.get("uploader") or pl.get("channel") or ""
+            thumbs = pl.get("thumbnails") or []
+            ins.thumbnail = thumbs[-1]["url"] if thumbs else ""
+    ins.ok = True
+    return ins
+
+
+def _inspect_spotify(t: Target) -> Inspection:
+    ins = Inspection(t, ok=False)
     if t.kind not in ("track", "album", "playlist"):
-        return PlatformRun([], None, f"Spotify '{t.kind}' links are not supported (use a track, album or playlist link). "
-                                     "Nothing was downloaded.")
+        ins.message = (f"Spotify '{t.kind}' links are not supported (use a track, album or playlist link). "
+                       "Nothing will be downloaded.")
+        return ins
     try:
         meta = spotify_metadata(t.kind, t.id)
     except Exception as exc:  # noqa: BLE001
-        return PlatformRun([], None, f"Could not read Spotify metadata: {exc}. Nothing was downloaded.")
-    tracks = meta["tracks"]
-    if not tracks:
-        return PlatformRun([], None, "No tracks found on this Spotify page. Nothing was downloaded.")
-    log("note: Spotify streams are DRM-protected and are not downloaded; each track is matched to its YouTube upload.")
+        ins.message = f"Could not read Spotify metadata: {exc}. Nothing will be downloaded."
+        return ins
+    if not meta["tracks"]:
+        ins.message = "No tracks found on this Spotify page. Nothing will be downloaded."
+        return ins
+    ins.entries = meta["tracks"]
     if t.kind == "track":
-        tr = tracks[0]
-        log(f"Track : {tr['artists']} - {tr['title']}  [{_fmt_dur(tr['duration'])}]")
-        chosen = [1]
-        dest = prompter.path("~/Downloads/WTS")
+        tr = meta["tracks"][0]
+        ins.title, ins.uploader, ins.duration = tr["title"], tr["artists"], tr["duration"]
     else:
-        log(f"Spotify {t.kind}: {meta['name']}  ({len(tracks)} tracks{', by ' + meta['owner'] if meta['owner'] else ''})")
-        _print_items([{"title": f"{x['artists']} - {x['title']}", "duration": x["duration"]} for x in tracks], log)
-        if t.kind == "playlist" and len(tracks) in (50, 100):
-            log("note: Spotify's public embed lists at most this many tracks; very long playlists may be truncated.")
-        chosen = expand_items(prompter.items(len(tracks), "all"), len(tracks))
-        dest = prompter.path("~/Downloads/WTS") / safe_name(meta["name"] or t.id, "spotify")
-        dest.mkdir(parents=True, exist_ok=True)
-    choice = prompter.format("mp3")
-    log(f"Format: {choice.describe()}  ->  {dest}")
-    downloads: list[dict[str, Any]] = []
-    width = len(str(len(tracks)))
-    for n, idx in enumerate(chosen, 1):
-        tr = tracks[idx - 1]
-        name = f"{tr['artists'].split(',')[0].strip()} - {tr['title']}"
-        log(f"[{n}/{len(chosen)}] {name}")
-        match = match_on_youtube(tr, log)
-        if not match:
-            log("   -> no matching YouTube upload found; skipped")
-            downloads.append({"candidate": {"url": "", "label": name}, "status": "no-match", "files": [], "info": {},
-                              "spotify": tr, "error": "no YouTube match"})
+        ins.title, ins.uploader = meta["name"] or "", meta["owner"]
+        ins.playlist_title = ins.title
+        ins.duration = sum(x["duration"] or 0 for x in meta["tracks"])
+    try:
+        oe = requests.get("https://open.spotify.com/oembed", params={"url": f"https://open.spotify.com/{t.kind}/{t.id}"},
+                          headers={"User-Agent": DEFAULT_UA}, timeout=15).json()
+        ins.thumbnail = oe.get("thumbnail_url") or ""
+    except Exception:  # noqa: BLE001
+        pass
+    ins.quality = "matched to YouTube uploads (Spotify audio is DRM-protected)"
+    ins.ok = True
+    return ins
+
+
+# --------------------------------------------------------------------------- downloading
+
+
+def _items_spec(items: list[int] | None) -> str | None:
+    if not items:
+        return None
+    items = sorted(set(items))
+    out, start, prev = [], items[0], items[0]
+    for i in items[1:] + [None]:
+        if i is not None and i == prev + 1:
+            prev = i
             continue
-        log(f"   matched: {match['title']}  [{_fmt_dur(match['duration'])}]  ({match['channel']})")
-        stem = safe_name((f"{idx:0{width}d} - " if t.kind != "track" else "") + name).replace("%", "%%")
-        r = _download([(match["url"], name)], dest, choice, stem + ".%(ext)s", lambda m: None, cookies, cookies_from_browser)[0]
-        log(f"   -> {r['status']}" + (f": {Path(r['files'][0]).name}" if r["files"] else f" ({r['error'][:150]})"))
-        r["spotify"] = tr
-        r["youtube_match"] = match
-        downloads.append(r)
-    return PlatformRun(downloads, dest)
+        out.append(f"{start}-{prev}" if start != prev else str(start))
+        if i is not None:
+            start = prev = i
+    return ",".join(out)
 
 
-# --------------------------------------------------------------------------- entry point
+def download(ins: Inspection, choice: FormatChoice, base: Path, mode: str = "auto", items: list[int] | None = None,
+             log: Callable[[str], None] = print, on_progress: Callable[[dict], None] | None = None, cancel=None,
+             cookies: str | None = None, cookies_from_browser: str | None = None, scan: bool = True,
+             use_av: bool = True) -> dict[str, Any]:
+    """Download an inspected link.
 
+    mode: 'video' (only the main video), 'playlist' (collection; `items` = 1-based indexes or None for all),
+          'auto' (video for single links, playlist for collections).
+    """
+    t = ins.target
+    if mode == "auto":
+        mode = "video" if t.kind in ("video", "video-in-playlist", "track") else "playlist"
+    base = Path(base).expanduser()
+    base.mkdir(parents=True, exist_ok=True)
+    kw = dict(cookiefile=cookies, cookies_from_browser=cookies_from_browser, choice=choice, write_info=False,
+              use_archive=False, log=log, on_progress=on_progress, cancel=cancel)
+    downloads: list[dict[str, Any]] = []
+    if t.platform == "youtube":
+        if mode == "video":
+            dest = base
+            dl = Downloader(dest, outtmpl="%(title).150B [%(id)s].%(ext)s", noplaylist=True, **kw)
+            log(f"Downloading: {ins.title or ins.video_url}")
+            r = dl.download(VideoCandidate(ins.video_url, "platform-link", "user", label=ins.title))
+            downloads.append(r.to_dict())
+        else:
+            dest = base / safe_name(ins.playlist_title or t.list_id, "playlist")
+            spec = _items_spec(items)
+            n = len(items) if items else len(ins.entries)
+            log(f"Downloading {n} item(s) of playlist '{ins.playlist_title}'")
+            dl = Downloader(dest, outtmpl="%(playlist_index)03d - %(title).150B [%(id)s].%(ext)s", noplaylist=False,
+                            playlist_items=spec, max_playlist=100_000, **kw)
+            r = dl.download(VideoCandidate(ins.playlist_url, "platform-link", "user", label=ins.playlist_title))
+            downloads.append(r.to_dict())
+        for d in downloads:
+            log(f"-> {d['status']}" + (f": {len(d['files'])} file(s)" if d["files"] else "")
+                + (f" ({d['error'][:200]})" if d["error"] and d["status"] != "downloaded" else ""))
+    else:
+        tracks = ins.entries
+        chosen = [1] if t.kind == "track" else (sorted(set(items)) if items else list(range(1, len(tracks) + 1)))
+        dest = base if t.kind == "track" else base / safe_name(ins.playlist_title or t.id, "spotify")
+        dest.mkdir(parents=True, exist_ok=True)
+        width = len(str(len(tracks)))
+        for n, idx in enumerate(chosen, 1):
+            if cancel is not None and cancel.is_set():
+                log("Cancelled.")
+                break
+            tr = tracks[idx - 1]
+            name = f"{tr['artists'].split(',')[0].strip()} - {tr['title']}"
+            log(f"[{n}/{len(chosen)}] {name}")
+            if on_progress:
+                on_progress({"status": "searching", "title": name, "index": n, "count": len(chosen),
+                             "downloaded": 0, "total": 0})
+            match = match_on_youtube(tr, log)
+            if not match:
+                log("   -> no matching YouTube upload found; skipped")
+                downloads.append({"candidate": {"url": "", "label": name}, "status": "no-match", "files": [],
+                                  "info": {}, "spotify": tr, "error": "no YouTube match"})
+                continue
+            log(f"   matched: {match['title']}  [{_fmt_dur(match['duration'])}]  ({match['channel']})")
+            stem = safe_name((f"{idx:0{width}d} - " if t.kind != "track" else "") + name).replace("%", "%%")
 
-def run_platform(t: Target, prompter: Prompter, log: Callable[[str], None] = print, cookies: str | None = None,
-                 cookies_from_browser: str | None = None, scan: bool = True, use_av: bool = True) -> dict[str, Any]:
-    handler = handle_youtube if t.platform == "youtube" else handle_spotify
-    res = handler(t, prompter, log, cookies, cookies_from_browser)
-    if res.message:
-        log(res.message)
-    findings_total, worst = 0, 0
+            def prog(d, n=n):
+                if on_progress:
+                    on_progress({**d, "title": name, "index": n, "count": len(chosen)})
+
+            dl = Downloader(dest, outtmpl=stem + ".%(ext)s", noplaylist=True,
+                            **{**kw, "on_progress": prog, "log": lambda m: None})
+            r = dl.download(VideoCandidate(match["url"], "platform-link", "spotify-match", label=name)).to_dict()
+            log(f"   -> {r['status']}" + (f": {Path(r['files'][0]).name}" if r["files"] else f" ({r['error'][:150]})"))
+            r["spotify"] = tr
+            r["youtube_match"] = match
+            downloads.append(r)
+
+    worst = 0
     if scan:
-        for d in res.downloads:
+        for d in downloads:
             d["media"] = []
             for f in d.get("files", []):
                 p = Path(f)
                 if p.suffix.lower() in MEDIA_EXTS and p.exists():
+                    if on_progress:
+                        on_progress({"status": "scanning", "title": p.name, "downloaded": 0, "total": 0})
                     m = scan_media(p, use_av=use_av)
                     d["media"].append(m)
-                    serious = [x for x in m["findings"] if x["severity"] in ("high", "critical")]
-                    findings_total += len(m["findings"])
                     worst = max([worst] + [sev_rank(x["severity"]) for x in m["findings"]])
+                    serious = [x for x in m["findings"] if x["severity"] in ("high", "critical")]
                     if serious:
                         log(f"  ! {p.name}: " + "; ".join(f"[{x['severity'].upper()}] {x['message']}" for x in serious))
-    report = {"target": t.url, "platform": t.platform, "kind": t.kind, "message": res.message,
-              "destination": str(res.dest) if res.dest else None, "downloads": res.downloads,
+    report = {"target": t.url, "platform": t.platform, "kind": t.kind, "mode": mode, "message": ins.message,
+              "destination": str(dest), "downloads": downloads,
               "highest_severity": ["info", "low", "medium", "high", "critical"][worst],
-              "downloaded_files": sum(len(d.get("files", [])) for d in res.downloads)}
-    if res.dest:
-        rdir = res.dest / ".wts"
-        rdir.mkdir(exist_ok=True)
-        (rdir / f"report-{time.strftime('%Y%m%d-%H%M%S')}.json").write_text(json.dumps(report, indent=2, default=str))
+              "downloaded_files": sum(len(d.get("files", [])) for d in downloads)}
+    rdir = dest / ".wts"
+    rdir.mkdir(parents=True, exist_ok=True)
+    (rdir / f"report-{time.strftime('%Y%m%d-%H%M%S')}.json").write_text(json.dumps(report, indent=2, default=str))
     return report
+
+
+# --------------------------------------------------------------------------- CLI flow
+
+
+def run_platform(t: Target, prompter: Prompter, log: Callable[[str], None] = print, cookies: str | None = None,
+                 cookies_from_browser: str | None = None, scan: bool = True, use_av: bool = True) -> dict[str, Any]:
+    ins = inspect(t)
+    empty = {"target": t.url, "platform": t.platform, "kind": t.kind, "message": ins.message, "destination": None,
+             "downloads": [], "highest_severity": "info", "downloaded_files": 0}
+    if not ins.ok:
+        log(ins.message)
+        return empty
+    if t.platform == "spotify" and t.kind != "track":
+        log("note: Spotify streams are DRM-protected and are not downloaded; each track is matched to its YouTube upload.")
+    mode, items = "auto", None
+    if t.kind == "video-in-playlist" and ins.entries:
+        mode = prompter.choice("This video is part of a playlist. What should be downloaded?",
+                               [("video", "Only this video"), ("playlist", "The whole playlist"),
+                                ("select", "Choose specific playlist items")],
+                               "select" if prompter.preset_items else "video")
+    elif t.kind == "video-in-playlist":
+        mode = "video"
+    if mode == "auto" and t.kind in ("video", "track"):
+        log(f"{'Video' if t.platform == 'youtube' else 'Track'} : {ins.title}  [{_fmt_dur(ins.duration)}]  by {ins.uploader}")
+        if ins.quality:
+            log(f"Best  : {ins.quality}")
+        if ins.is_live:
+            log("note: this is a live stream; it will be recorded until it ends or you press Ctrl+C")
+        mode = "video"
+    elif mode != "video":
+        log(f"{t.kind.replace('-', ' ').title()}: {ins.playlist_title or ins.title}  ({len(ins.entries)} items)")
+        _print_items([{"title": (f"{x['artists']} - {x['title']}" if "artists" in x else x["title"]),
+                       "duration": x.get("duration")} for x in ins.entries], log)
+        if t.platform == "spotify" and t.kind == "playlist" and len(ins.entries) in (50, 100):
+            log("note: Spotify's public embed lists at most this many tracks; very long playlists may be truncated.")
+        spec = None
+        if mode == "select" or t.kind in ("playlist", "album"):
+            spec = prompter.items(len(ins.entries), "all")
+        items = expand_items(spec, len(ins.entries)) if spec else None
+        log(f"Selected {len(items) if items else len(ins.entries)} of {len(ins.entries)} item(s)")
+        mode = "playlist"
+    base = prompter.path("~/Downloads/WTS")
+    choice = prompter.format("mp3" if t.platform == "spotify" else "best")
+    log(f"Format: {choice.describe()}  ->  {base}")
+    return download(ins, choice, base, mode, items, log=log, cookies=cookies,
+                    cookies_from_browser=cookies_from_browser, scan=scan, use_av=use_av)

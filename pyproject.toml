@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "web-treasure-stalker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Discover and download all videos on a web site, scan site and media for malware/attacks, and flag likely piracy."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,6 +13,7 @@ dependencies = [
     "playwright>=1.45",
     "requests>=2.31",
     "beautifulsoup4>=4.12",
+    "pyside6-essentials>=6.6",
 ]
 
 [project.optional-dependencies]
@@ -20,13 +21,13 @@ yara = ["yara-python>=4.5"]
 dev = ["pytest>=8"]
 
 [project.scripts]
-wts = "wts.cli:main"
+wts = "wts.__main__:entry"
 
 [tool.setuptools.packages.find]
 include = ["wts*"]
 
 [tool.setuptools.package-data]
-wts = ["rules/*.yar"]
+wts = ["rules/*.yar", "gui/assets/*", "gui/assets/fonts/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

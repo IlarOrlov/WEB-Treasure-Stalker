@@ -17,7 +17,11 @@ def build_parser() -> argparse.ArgumentParser:
                     "site and the videos for malware/attacks, and flag likely piracy. YouTube and Spotify links are "
                     "handled directly (single item or playlist). For local blue-team analysis.",
     )
-    p.add_argument("url", help="page, YouTube or Spotify URL to analyse")
+    p.add_argument("url", nargs="?", help="page, YouTube or Spotify URL to analyse")
+    t = p.add_argument_group("setup")
+    t.add_argument("--install", choices=["ffmpeg", "deno", "browser", "all"],
+                   help="download a helper tool into the app folder and exit")
+    t.add_argument("--check-tools", action="store_true", help="show which helper tools are available and exit")
     g = p.add_argument_group("download choices (asked interactively when omitted)")
     g.add_argument("-p", "--path", "-o", "--out", dest="path",
                    help="download folder; playlists/albums/series get their own sub-folder")
@@ -52,7 +56,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    a = build_parser().parse_args(argv)
+    parser = build_parser()
+    a = parser.parse_args(argv)
+    from .tools import setup_environment
+
+    setup_environment()
+    if a.check_tools or a.install:
+        return _tools_cmd(a)
+    if not a.url:
+        parser.error("a URL is required (run without arguments to open the GUI)")
     url = a.url.strip()
     if not url.startswith(("http://", "https://", "spotify:")):
         url = "https://" + url
@@ -72,6 +84,32 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
+
+
+def _tools_cmd(a: argparse.Namespace) -> int:
+    from . import tools
+
+    def bar(done: int, total: int) -> None:
+        if total:
+            print(f"\r  {done / 1048576:6.1f} / {total / 1048576:.1f} MB", end="", flush=True)
+
+    targets = ["ffmpeg", "deno", "browser"] if a.install == "all" else ([a.install] if a.install else [])
+    for t in targets:
+        print(f"Installing {t}…")
+        try:
+            if t == "ffmpeg":
+                tools.install_ffmpeg(bar)
+            elif t == "deno":
+                tools.install_deno(bar)
+            else:
+                tools.install_browser(print)
+            print(f"\n  {t}: done")
+        except Exception as exc:  # noqa: BLE001
+            print(f"\n  {t}: FAILED: {exc}")
+            return 1
+    for st in tools.status():
+        print(f"  [{'ok' if st.found else '--'}] {st.name:28s} {st.detail}")
+    return 0
 
 
 def _run_site(url: str, a: argparse.Namespace, prompter: Prompter) -> int:

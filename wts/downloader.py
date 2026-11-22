@@ -71,7 +71,8 @@ class Downloader:
                  choice: FormatChoice | None = None, max_playlist: int = 50, user_agent: str | None = None,
                  subtitles: bool = False, outtmpl: str | None = None, write_info: bool = True,
                  noplaylist: bool = False, playlist_items: str | None = None, use_archive: bool = True,
-                 progress: bool = False, log: Callable[[str], None] = print):
+                 progress: bool = False, log: Callable[[str], None] = print,
+                 on_progress: Callable[[dict], None] | None = None, cancel=None):
         self.dest = dest
         self.cookiefile = cookiefile
         self.cookies_from_browser = cookies_from_browser
@@ -84,6 +85,8 @@ class Downloader:
         self.noplaylist = noplaylist
         self.playlist_items = playlist_items
         self.progress = progress
+        self.on_progress = on_progress
+        self.cancel = cancel
         self.log = log
         self.archive = dest / ".download-archive.txt" if use_archive else None
         dest.mkdir(parents=True, exist_ok=True)
@@ -109,6 +112,7 @@ class Downloader:
             "allow_unplayable_formats": False,  # never touch DRM-protected formats
             "logger": logger,
             "post_hooks": [files.append],
+            "progress_hooks": [self._hook],
             "socket_timeout": 30,
             **js_runtime_opts(),
             **self.choice.ytdl_opts(),
@@ -123,6 +127,21 @@ class Downloader:
         if self.cookies_from_browser:
             opts["cookiesfrombrowser"] = (self.cookies_from_browser,)
         return opts
+
+    def _hook(self, d: dict) -> None:
+        if self.cancel is not None and self.cancel.is_set():
+            from yt_dlp.utils import DownloadCancelled
+
+            raise DownloadCancelled("cancelled by user")
+        if self.on_progress:
+            info = d.get("info_dict") or {}
+            self.on_progress({
+                "status": d.get("status"), "downloaded": d.get("downloaded_bytes") or 0,
+                "total": d.get("total_bytes") or d.get("total_bytes_estimate") or 0,
+                "speed": d.get("speed") or 0, "eta": d.get("eta"), "title": info.get("title") or "",
+                "index": info.get("playlist_index"), "count": info.get("n_entries") or info.get("playlist_count"),
+                "filename": d.get("filename") or "",
+            })
 
     def download(self, cand: VideoCandidate) -> DownloadResult:
         import yt_dlp
@@ -147,7 +166,9 @@ class Downloader:
             msg = re.sub(r"\x1b\[[0-9;]*m", "", str(exc))
             res.error = msg[:500]
             low = msg.lower()
-            if "drm" in low:
+            if "cancelled" in low:
+                res.status = "cancelled"
+            elif "drm" in low:
                 res.status = "drm"
             elif any(s in low for s in ("unsupported url", "no video formats", "no video could be found",
                                         "there's no video", "does not contain any video", "is not a valid url")):

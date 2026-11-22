@@ -1,6 +1,8 @@
-# WEB-Treasure-Stalker (`wts`)
+# WEB-Treasure-Stalker
 
-A blue-team / OSINT tool that takes a link and:
+![icon](wts/gui/assets/icon.png)
+
+A desktop app (GUI + CLI, Linux and Windows) for blue-team / OSINT work. Give it a link and it:
 
 1. **Finds every video** on the page: `<video>` tags, iframes and embeds (Instagram reels, YouTube,
    Vimeo, TikTok, X, Facebook, and so on), og:video and JSON-LD data, JS player configs, and the HLS/DASH/MP4
@@ -42,7 +44,54 @@ Every download asks for the **destination folder** and the **format**:
 
 Series, playlists and site runs always get their own sub-folder.
 
-## Install
+## Download (no install)
+
+Grab the single-file app from the [**Releases**](https://github.com/IlarOrlov/WEB-Treasure-Stalker/releases/latest) page:
+
+| Platform | File |
+|---|---|
+| Windows 10/11 x64 | `WEB-Treasure-Stalker-windows-x64.exe` |
+| Linux x64 (glibc ≥ 2.35: Ubuntu 22.04+, Debian 12+, Fedora 36+ …) | `WEB-Treasure-Stalker-linux-x64` (then run `chmod +x WEB-Treasure-Stalker-linux-x64`) |
+
+Double-click it to open the GUI. On first run, open **Tools** and click **Install** for:
+
+- **FFmpeg:** merges the best video and audio streams and converts formats
+- **Chromium engine:** renders web sites, captures streams and walks episode menus
+- **Deno:** optional; unlocks every YouTube format
+
+Downloads are verified against their published SHA-256 checksums. Tools you already have (system FFmpeg,
+Chrome, Edge, Node) are detected automatically.
+
+The same file is also the CLI: `WEB-Treasure-Stalker <url> -y -p <folder> -f mp4` (see `--help`).
+Use `--check-tools` to list the helper tools, or `--install ffmpeg|deno|browser|all` to install them.
+
+> Windows SmartScreen may warn because the exe isn't code-signed: choose *More info → Run anyway*.
+> Each release includes `SHA256SUMS.txt` for verification.
+
+### The GUI
+
+- **Grab & analyse:** paste a link and click Inspect. For YouTube and Spotify you get a preview with the thumbnail,
+  the best available quality and a checkable track or episode list (filter, all, none, invert). For web sites you get
+  the scan options. Then choose the folder, format and resolution, and click Download or Start analysis. Progress shows
+  live per item, with speed, ETA and an activity log; Cancel works at any time.
+- **Results:** the piracy score gauge with its reasons, stat tiles, a threats table filterable by severity,
+  per-video security status, the located streams and the log. Buttons open the HTML report or the folder.
+- **History:** previous runs. Double-click one to reopen its report or folder.
+- **Tools:** status of FFmpeg, the JS runtime, the browser engine and ClamAV/YARA, with one-click installs.
+- Dark and light themes.
+
+## Build the executables yourself
+
+```bash
+pip install -e ".[dev]" "yt-dlp[default]" pyside6-essentials pyinstaller
+pyinstaller packaging/wts.spec --noconfirm        # -> dist/WEB-Treasure-Stalker(.exe)
+```
+
+PyInstaller builds for the OS it runs on. Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which
+builds Linux and Windows on GitHub Actions, runs the tests, and publishes a release with both files and checksums.
+
+## Install from source (CLI / development)
+
 
 Requires Python ≥ 3.10 and `ffmpeg`/`ffprobe`.
 
@@ -50,7 +99,7 @@ Requires Python ≥ 3.10 and `ffmpeg`/`ffprobe`.
 git clone https://github.com/IlarOrlov/WEB-Treasure-Stalker.git
 cd WEB-Treasure-Stalker
 python3 -m venv .venv && . .venv/bin/activate      # or: uv venv && uv pip install ...
-pip install -e ".[dev]" "yt-dlp[default]"
+pip install -e ".[dev]" "yt-dlp[default]" pyside6-essentials
 python -m playwright install chromium
 
 # optional but recommended
@@ -64,7 +113,8 @@ detected automatically.
 ## Usage
 
 ```bash
-# interactive: asks for folder, format, items
+wts                       # no arguments: opens the GUI
+# interactive CLI: asks for folder, format, items
 wts "https://some-site.example/series/show"
 wts "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 wts "https://www.youtube.com/playlist?list=PL..."
