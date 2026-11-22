@@ -50,3 +50,26 @@ def test_media_response_detection():
     assert is_media_response("https://x/v", "media", "video/mp4")
     assert not is_media_response("https://x/seg-12.ts", "xhr", "video/mp2t")
     assert not is_media_response("https://x/app.js", "script", "application/javascript")
+
+
+def test_episode_keys_and_titles():
+    from wts.episodes import episode_key, episode_path, series_title
+    from wts.models import VideoCandidate as V
+
+    assert episode_key(V("https://x/hls/abc.m3u8", "stream", "network", label="Season 3 / Episode 12")) == (3, 12)
+    assert episode_key(V("https://mp.thementalist.ru/The-Mentalist-season-1-episode-7.mp4", "direct", "inline-script")) == (1, 7)
+    assert episode_key(V("https://cdn/x/Show.S02E05.1080p.mkv", "direct", "link")) == (2, 5)
+    # a link listed on an episode page is NOT that page's episode
+    assert episode_key(V("https://cdn/trailer.mp4", "direct", "inline-script", page="https://x/season-1/episode-1")) is None
+    assert episode_key(V("https://cdn/v.mp4", "direct", "video-source", page="https://x/seasons/season-2/episode-4")) == (2, 4)
+    assert series_title("<title>Менталист (1-7 сезон) смотреть онлайн бесплатно все серии</title>", "x") == "Менталист"
+    assert series_title("<title>Сериал Менталист все сезоны и серии смотреть Бесплатно</title>", "x") == "Менталист"
+    assert episode_path("Менталист", (1, 3)) == "Менталист/Season 1/Episode 03.%(ext)s"
+
+
+def test_episode_key_repeated_season():
+    from wts.episodes import episode_key
+    from wts.models import VideoCandidate as V
+
+    assert episode_key(V("https://mp.thementalist.ru/The-Mentalist-season-3-episode-3-17.mp4", "direct", "inline-script")) == (3, 17)
+    assert episode_key(V("https://x/Show-season-2-episode-11-1080p.mp4", "direct", "link")) == (2, 11)

@@ -124,6 +124,16 @@ def _run_site(url: str, a: argparse.Namespace, prompter: Prompter) -> int:
                    depth=a.depth, max_combinations=a.max_combinations, timeout=a.timeout, cookies=a.cookies,
                    cookies_from_browser=a.cookies_from_browser, choice=choice, deep=a.deep, virustotal=a.virustotal,
                    headful=a.headful, subtitles=a.subs, av=not a.no_av, max_playlist=a.max_playlist)
+    def choose(series: str, labels: list[str]) -> list[str] | None:
+        from .prompts import expand_items
+
+        print(f"\nSeries '{series}': {len(labels)} episode(s) found")
+        for i, lb in enumerate(labels, 1):
+            print(f"  {i:>4}. {lb}")
+        spec = prompter.items(len(labels), "all")
+        return [labels[i - 1] for i in expand_items(spec, len(labels))]
+
+    opts.choose_episodes = choose
     report, _ = run(url, opts)
     print(print_summary(report))
     return 2 if report["summary"]["highest_severity"] in ("critical", "high") else 0

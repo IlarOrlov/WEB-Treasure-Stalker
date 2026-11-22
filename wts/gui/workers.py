@@ -28,11 +28,21 @@ class JobContext:
     def stage(self, name: str, frac: float) -> None:
         self._job.stage.emit(name, float(frac))
 
+    def ask(self, kind: str, payload: Any) -> Any:
+        """Ask the GUI a question and block this worker thread until it answers (or the job is cancelled)."""
+        holder = {"kind": kind, "payload": payload, "answer": None, "event": threading.Event()}
+        self._job.ask.emit(holder)
+        while not holder["event"].wait(0.2):
+            if self.cancel.is_set():
+                return None
+        return holder["answer"]
+
 
 class Job(QThread):
     log = Signal(str)
     progress = Signal(dict)
     stage = Signal(str, float)
+    ask = Signal(object)
     done = Signal(object)
     failed = Signal(str)
 

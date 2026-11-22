@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QPixmap
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
                                QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
@@ -126,6 +126,72 @@ class OptionsBar(Card):
 
 
 # --------------------------------------------------------------------------- page
+
+
+class EpisodePicker(QDialog):
+    """Checkable season/episode tree shown before a series is downloaded."""
+
+    def __init__(self, parent, series: str, labels: list[str]):
+        super().__init__(parent)
+        self.setWindowTitle("Choose episodes")
+        self.resize(560, 640)
+        seasons: dict[str, list[str]] = {}
+        for lb in labels:
+            season = lb.split(" / ")[0] if " / " in lb else "Episodes"
+            seasons.setdefault(season, []).append(lb)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(10)
+        lay.addWidget(label(series, "h2"))
+        lay.addWidget(label(f"{len(labels)} episodes in {len(seasons)} season(s). Saved as {series}/Season N/Episode MM. "
+                            "Each episode can be 0.5–2 GB.", "muted", wrap=True))
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        for season, eps in seasons.items():
+            top = QTreeWidgetItem([f"{season}  ({len(eps)})"])
+            top.setFlags(top.flags() | Qt.ItemIsAutoTristate | Qt.ItemIsUserCheckable)
+            top.setCheckState(0, Qt.Checked)
+            for lb in eps:
+                ch = QTreeWidgetItem([lb.split(" / ")[-1]])
+                ch.setFlags(ch.flags() | Qt.ItemIsUserCheckable)
+                ch.setCheckState(0, Qt.Checked)
+                ch.setData(0, Qt.UserRole, lb)
+                top.addChild(ch)
+            self.tree.addTopLevelItem(top)
+        self.tree.itemChanged.connect(lambda *_: self._count())
+        lay.addWidget(self.tree, 1)
+        self.count = label("", "h3")
+        none_b, all_b = QPushButton("None"), QPushButton("All")
+        none_b.setObjectName("ghost")
+        all_b.setObjectName("ghost")
+        none_b.clicked.connect(lambda: self._set(False))
+        all_b.clicked.connect(lambda: self._set(True))
+        skip = QPushButton("Skip downloads")
+        skip.clicked.connect(self.reject)
+        self.ok = QPushButton(icons.icon("download", "#ffffff", 16), "  Download selected")
+        self.ok.setObjectName("primary")
+        self.ok.clicked.connect(self.accept)
+        lay.addLayout(hbox(self.count, None, all_b, none_b))
+        lay.addLayout(hbox(None, skip, self.ok))
+        self._count()
+
+    def _items(self):
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            for j in range(top.childCount()):
+                yield top.child(j)
+
+    def _set(self, on: bool) -> None:
+        for i in range(self.tree.topLevelItemCount()):
+            self.tree.topLevelItem(i).setCheckState(0, Qt.Checked if on else Qt.Unchecked)
+
+    def _count(self) -> None:
+        n = len(self.selected())
+        self.count.setText(f"{n} selected")
+        self.ok.setEnabled(n > 0)
+
+    def selected(self) -> list[str]:
+        return [it.data(0, Qt.UserRole) for it in self._items() if it.checkState(0) == Qt.Checked]
 
 
 class GrabPage(QWidget):
@@ -819,9 +885,14 @@ class GrabPage(QWidget):
         self._job_items = 0
         self._prep_running("Analysing site")
 
+        if downloading:
+            opts.choose_episodes = None  # set per job below (needs the job context)
+
         def work(ctx):
             from ..pipeline import run
 
+            if downloading:
+                opts.choose_episodes = lambda series, labels: ctx.ask("episodes", (series, labels))
             report, _ = run(url, opts, log=ctx.log, cancel=ctx.cancel, on_progress=ctx.progress, on_stage=ctx.stage)
             return report
 
@@ -832,6 +903,7 @@ class GrabPage(QWidget):
         self.job.log.connect(self._log)
         self.job.progress.connect(self._progress)
         self.job.stage.connect(self._stage)
+        self.job.ask.connect(self._answer)
         self.job.done.connect(on_done)
         self.job.failed.connect(on_fail)
         self.job.finished.connect(self._job_finished)
@@ -842,6 +914,13 @@ class GrabPage(QWidget):
         self.inspect_btn.setEnabled(True)
         self.run_spinner.stop()
         self.busy_changed.emit(False)
+
+    def _answer(self, holder: dict) -> None:
+        if holder["kind"] == "episodes":
+            series, labels = holder["payload"]
+            dlg = EpisodePicker(self, series, labels)
+            holder["answer"] = dlg.selected() if dlg.exec() else None
+        holder["event"].set()
 
     def cancel(self) -> None:
         if self.job:

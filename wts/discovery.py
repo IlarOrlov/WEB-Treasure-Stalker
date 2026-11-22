@@ -48,6 +48,13 @@ IGNORE_IFRAME_RE = re.compile(
 # Media served by platforms that yt-dlp handles better through the page/embed URL.
 PLATFORM_CDN_RE = re.compile(r"googlevideo\.com|cdninstagram|fbcdn\.net|vimeocdn|ttwstatic|tiktokcdn|"
                              r"twimg\.com|dmcdn\.net|jtvnw\.net|ytimg\.com", re.I)
+# Pre-roll / ad video served inside players: never treated as a video candidate.
+AD_MEDIA_RE = re.compile(
+    r"vh-canvas|adfox|/vast[/?]|vast\.xml|preroll|pre-roll|imasdk|doubleclick|googlesyndication|adriver|"
+    r"betweendigital|adsrv|/ads?/|[?&]ad(_|=)|videoroll|vroll|advert|adhigh|moevideo|buzzoola|otm-r|"
+    r"exoclick|trafficjunky|realsrv|adnxs|smartadserver|yandex\.ru/ads",
+    re.I,
+)
 EPISODE_LINK_RE = re.compile(
     r"(season|episode|/series/|/tv/|/watch|/s\d{1,2}e\d{1,3}|[-_/]s\d{1,2}[-_]?e\d{1,3}|[-_/]ep(isode)?[-_]?\d+|"
     r"עונה|פרק|temporada|episodio|saison|[ée]pisode|staffel|folge|сезон|серия|موسم|حلقة)",
@@ -275,6 +282,34 @@ _EPISODE_ITEMS_JS = r"""
 }
 """
 
+# Season / episode option lists rendered by embedded players (dropdowns of buttons, list items, divs ...).
+_PLAYER_MENU_JS = r"""
+(kind) => {
+  const SEASON = /^\s*(?:season|сезон|temporada|saison|staffel|stagione|sezon|sezonul|עונה|الموسم)\s*(\d{1,3})\s*$|^\s*(\d{1,3})\s*(?:-?й\s*)?(?:season|сезон|temporada|saison|staffel|sezon)\s*$/i;
+  const EPISODE = /^\s*(?:episode|серия|эпизод|episodio|épisode|folge|odcinek|bölüm|epizod|פרק|الحلقة|ep\.?)\s*(\d{1,4})\s*$|^\s*(\d{1,4})\s*(?:-?я\s*)?(?:episode|серия|эпизод|episodio|épisode|folge|bölüm)\s*$/i;
+  const rx = kind === 'season' ? SEASON : EPISODE;
+  const txt = e => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+  const found = new Map();
+  for (const e of document.querySelectorAll('body *')) {
+    if (e.children.length > 3) continue;
+    // links to other pages are crawled, not clicked as player menu items
+    const a = e.closest('a[href]');
+    if (a) { const h = a.getAttribute('href') || ''; if (h && !h.startsWith('#') && !h.startsWith('javascript')) continue; }
+    const m = txt(e).match(rx);
+    if (!m || !e.parentElement) continue;
+    // real options live in a list together with siblings of the same kind (the dropdown "title" does not)
+    const sibs = Array.from(e.parentElement.children).filter(s => rx.test(txt(s))).length;
+    if (sibs < 2) continue;
+    const n = parseInt(m[1] || m[2], 10);
+    if (!found.has(n)) found.set(n, e);
+  }
+  const items = Array.from(found.entries()).sort((a, b) => a[0] - b[0]);
+  document.querySelectorAll('[data-wts-pm-' + kind + ']').forEach(e => e.removeAttribute('data-wts-pm-' + kind));
+  items.forEach(([n, e]) => e.setAttribute('data-wts-pm-' + kind, String(n)));
+  return items.map(([n]) => n);
+}
+"""
+
 _PLAY_SELECTORS = [
     ".vjs-big-play-button", ".jw-icon-playback", ".jw-display-icon-container", ".plyr__control--overlaid",
     ".ytp-large-play-button", "button[aria-label*='play' i]", ".play-button", ".play-btn", "[class*='play-icon']",
@@ -371,7 +406,8 @@ class BrowserDiscoverer:
                 entry["status"] = resp.status
                 entry["content_type"] = ct
                 entry["length"] = headers.get("content-length", "")
-                if is_media_response(resp.url, entry["type"], ct) and not PLATFORM_CDN_RE.search(resp.url):
+                if (is_media_response(resp.url, entry["type"], ct) and not PLATFORM_CDN_RE.search(resp.url)
+                        and not AD_MEDIA_RE.search(resp.url)):
                     referer = entry.get("referer") or entry.get("frame") or self._res.url
                     self._res.candidates.append(VideoCandidate(
                         url=resp.url, kind=classify_url(resp.url) if MEDIA_URL_RE.search(resp.url) else "direct",
@@ -512,6 +548,120 @@ class BrowserDiscoverer:
         if n:
             self._settle(page, 8000)
 
+    # season / episode menus inside embedded players --------------------------
+    def _pm_click(self, frame, kind: str, n: int) -> bool:
+        try:
+            return bool(frame.evaluate("""([k, n]) => { const e = document.querySelector(`[data-wts-pm-${k}="${n}"]`);
+                if (!e) return false; e.scrollIntoView({block: 'nearest'}); e.click(); return true; }""", [kind, n]))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _network_urls(self) -> set[str]:
+        return {c.url for c in self._res.candidates if c.source == "network"}
+
+    def _wait_new_stream(self, page, label: str, seen: set[str], seconds: float) -> bool:
+        """Wait for a stream URL that did not exist before the click and credit it to `label`."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            new = [c for c in self._res.candidates if c.source == "network" and c.url not in seen]
+            if new:
+                page.wait_for_timeout(1200)  # let mirrors of the same stream arrive too
+                for c in self._res.candidates:
+                    if c.source == "network" and c.url not in seen:
+                        c.label = label
+                return True
+            page.wait_for_timeout(250)
+            self._reap_popups()
+        return False
+
+    def _play_in_frame(self, frame) -> None:
+        try:
+            frame.evaluate("() => document.querySelectorAll('video').forEach(v => { v.muted = true; "
+                           "v.play && v.play().catch(() => {}); })")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _walk_player_menus(self, page) -> bool:
+        """Select every season/episode in an embedded player and capture the stream it loads.
+
+        Returns True if a player playlist was found (then page-level menus are not walked)."""
+        frames = [f for f in page.frames if f is not page.main_frame]  # embedded players first
+        try:  # the page itself only counts as a player if it contains a video element
+            if page.main_frame.evaluate("() => !!document.querySelector('video')"):
+                frames.append(page.main_frame)
+        except Exception:  # noqa: BLE001
+            pass
+        start_url = page.url
+        for frame in frames:
+            try:
+                seasons = frame.evaluate(_PLAYER_MENU_JS, "season")
+                episodes = frame.evaluate(_PLAYER_MENU_JS, "episode")
+            except Exception:  # noqa: BLE001
+                continue
+            if len(episodes) < 2 and len(seasons) < 2:
+                continue
+            host = urlparse(frame.url).netloc
+            self.log(f"  player playlist in {host}: {len(seasons) or 1} season(s), {len(episodes)} episode(s) in the first")
+            initial = [c for c in self._res.candidates if c.source == "network" and not c.label]
+            first = True
+            for s in (seasons or [None]):
+                if self._combos >= self.max_combinations or (self.cancel is not None and self.cancel.is_set()):
+                    break
+                season_seen = self._network_urls()  # the season's first episode often loads on the season click
+                if s is not None:
+                    self._event(f"Opening season {s}")
+                    try:
+                        frame.evaluate(_PLAYER_MENU_JS, "season")  # re-mark: the player re-renders its lists
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if not self._pm_click(frame, "season", s):
+                        self.log(f"  could not open season {s}")
+                        continue
+                    page.wait_for_timeout(1500)
+                    if page.url != start_url:  # it was site navigation, not a player menu
+                        self.log("  season items navigate to other pages; crawling them instead")
+                        try:
+                            page.go_back(timeout=self.timeout_ms)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return False
+                try:
+                    eps = frame.evaluate(_PLAYER_MENU_JS, "episode") or [None]
+                except Exception:  # noqa: BLE001
+                    eps = [None]
+                # generous time budget for big catalogues: ~12 s per episode
+                self._deadline = max(self._deadline, time.monotonic() + 12 * len(eps) + 30)
+                for e in eps:
+                    if self._combos >= self.max_combinations or self._stop():
+                        break
+                    label = " / ".join(x for x in (f"Season {s}" if s is not None else "",
+                                                    f"Episode {e}" if e is not None else "") if x)
+                    self._label = label
+                    self._event(f"Capturing {label}")
+                    seen = season_seen if e == eps[0] else self._network_urls()
+                    if e is not None:
+                        try:
+                            frame.evaluate(_PLAYER_MENU_JS, "episode")  # re-mark before clicking
+                        except Exception:  # noqa: BLE001
+                            pass
+                        self._pm_click(frame, "episode", e)
+                    got = self._wait_new_stream(page, label, seen, 12)
+                    if not got:  # player waits for 'play' (or a pre-roll is running): start it and wait longer
+                        self._play_in_frame(frame)
+                        got = self._wait_new_stream(page, label, seen, 20)
+                    if not got and first and initial:  # first episode was already loaded before the walk
+                        for c in initial:
+                            c.label = label
+                        got = True
+                    if not got:
+                        self.log(f"  no stream captured for {label}")
+                    first = False
+                    self._combos += 1
+                    self._res.selections.append(label)
+            self._label = ""
+            return True
+        return False
+
     # season / episode enumeration -------------------------------------------
     def _walk_selects(self, page, labels: list[str], used: set[str]) -> None:
         if self._combos >= self.max_combinations or self._stop():
@@ -613,7 +763,9 @@ class BrowserDiscoverer:
             self._event("Starting players")
             self._try_play(page)
             self._harvest(page, "")
-            if enumerate_episodes:
+            if enumerate_episodes and self._walk_player_menus(page):
+                pass  # the embedded player's own playlist was walked
+            elif enumerate_episodes:
                 self._walk_selects(page, [], set())
                 self._click_items(page, "season", "")
                 if not any(s for s in res.selections):

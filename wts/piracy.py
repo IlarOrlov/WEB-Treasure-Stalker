@@ -63,9 +63,18 @@ def assess_site(pages: list[PageResult], candidates: list[VideoCandidate], site_
     if site_report.get("popups"):
         reasons.append((5, "forces pop-ups/pop-unders"))
 
-    episodes = {c.label for c in candidates if c.label}
-    if len(episodes) >= 3 and not _is_official(url):
-        reasons.append((15, f"free season/episode catalogue on an unofficial site ({len(episodes)} selections)"))
+    from .episodes import episode_key
+
+    eps = {k for k in (episode_key(c) for c in candidates) if k}
+    labels = {c.label for c in candidates if c.label}
+    if not _is_official(url):
+        if len(eps) >= 10:
+            reasons.append((35, f"free complete TV-series catalogue on an unofficial site ({len(eps)} episodes)"))
+        elif len(eps) >= 3 or len(labels) >= 3:
+            reasons.append((15, f"free season/episode catalogue on an unofficial site ({max(len(eps), len(labels))} episodes)"))
+        own = [c for c in candidates if episode_key(c) and site_key(c.url) == site_key(url)]
+        if len(eps) >= 3 and own:
+            reasons.append((10, "episode files are served from the site's own servers"))
     if candidates and site_key(url) and all(site_key(c.url) != site_key(url) for c in candidates) and not _is_official(url):
         if any(c.kind in ("embed", "stream") for c in candidates):
             reasons.append((5, "all video is served from third-party hosts (site only aggregates embeds)"))

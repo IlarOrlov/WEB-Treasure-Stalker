@@ -40,6 +40,8 @@ class Options:
     av: bool = True
     max_scripts: int = 60
     max_playlist: int = 50
+    # called with (series title, ["Season 1 / Episode 1", ...]); returns the labels to download or None to skip
+    choose_episodes: Any = None
 
 
 def _save_evidence(pages: list[PageResult], evidence: Path) -> None:
@@ -55,6 +57,22 @@ def _save_evidence(pages: list[PageResult], evidence: Path) -> None:
         (d / "headers.json").write_text(json.dumps(pg.headers, indent=1))
         for j, fr in enumerate(pg.frames, 1):
             (d / f"frame_{j:02d}.html.txt").write_text(f"<!-- {fr['url']} -->\n{fr['html']}")
+
+
+def _series_summary(series: str, episodes: dict, downloads: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not series:
+        return None
+    got: dict[str, list[str]] = {}
+    for d in downloads:
+        if d.get("episode") and d["status"] == "downloaded":
+            got[d["episode"]] = d["files"]
+    seasons: dict[str, list[str]] = {}
+    for k in episodes:
+        seasons.setdefault(f"Season {k[0]}" if k[0] is not None else "Episodes", []).append(f"Episode {k[1]}")
+    return {"title": series, "episodes_found": len(episodes), "episodes_downloaded": len(got),
+            "missing": [lbl for lbl in (f"Season {k[0]} / Episode {k[1]}" if k[0] is not None else f"Episode {k[1]}"
+                                        for k in episodes) if lbl not in got],
+            "seasons": {s: len(v) for s, v in seasons.items()}}
 
 
 def discover(url: str, opts: Options, evidence: Path, log: Callable[[str], None],
@@ -134,19 +152,66 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None
         except Exception as exc:  # noqa: BLE001
             site["virustotal"] = {"error": str(exc)}
 
+    # series episodes: <Series>/Season N/Episode MM ---------------------------------
+    from .episodes import episode_path, group_episodes, label_of, series_title
+
+    episodes, others = group_episodes(candidates)
+    series = series_title(pages[0].rendered_html or pages[0].raw_html, host) if episodes else ""
+    if episodes:
+        seasons = sorted({k[0] for k in episodes if k[0] is not None})
+        log(f"[episodes] '{series}': {len(episodes)} episode(s) in {len(seasons) or 1} season(s)")
+        if opts.download and opts.choose_episodes is not None:
+            chosen = opts.choose_episodes(series, [label_of(k) for k in episodes])
+            if chosen is None:
+                episodes = {}
+                log("[episodes] episode downloads skipped by user")
+            else:
+                keep = set(chosen)
+                episodes = {k: v for k, v in episodes.items() if label_of(k) in keep}
+                log(f"[episodes] {len(episodes)} episode(s) selected")
+
     downloads: list[dict[str, Any]] = []
-    if opts.download and candidates:
+    total = len(episodes) + len(others)
+    if opts.download and total:
         stage("Downloading videos", 0.45)
         dl = Downloader(qdir, cookiefile=opts.cookies or cookie_jar, cookies_from_browser=opts.cookies_from_browser,
                         choice=opts.choice, max_playlist=opts.max_playlist, subtitles=opts.subtitles, log=log,
                         on_progress=on_progress, cancel=cancel, write_info=False)
-        covered: set[str] = set()
-        mirrors: set[tuple[str, str]] = set()
-        for i, cand in enumerate(candidates, 1):
+        # episodes are de-duplicated by season/episode already; yt-dlp's id-based archive would wrongly treat
+        # different episodes of one player (all with the generic id "hls") as duplicates
+        dl_eps = Downloader(qdir, cookiefile=opts.cookies or cookie_jar, cookies_from_browser=opts.cookies_from_browser,
+                            choice=opts.choice, subtitles=opts.subtitles, log=log, on_progress=on_progress,
+                            cancel=cancel, write_info=False, use_archive=False)
+        n = 0
+        for key, group in episodes.items():
             if cancelled():
                 log("[download] cancelled")
                 break
-            stage(f"Downloading {i}/{len(candidates)}", 0.45 + 0.4 * (i - 1) / len(candidates))
+            n += 1
+            label = label_of(key)
+            stage(f"Downloading {label} ({n}/{total})", 0.45 + 0.4 * (n - 1) / total)
+            done = False
+            for cand in group:  # best source first; mirrors and alternatives only if it fails
+                if done or cancelled():
+                    downloads.append({"candidate": cand.to_dict(), "status": "skipped", "files": [], "info": {},
+                                      "episode": label, "error": "episode already downloaded from another source"})
+                    continue
+                cand.label = label
+                log(f"[download {n}/{total}] {label}: {cand.url[:100]}")
+                r = dl_eps.download(cand, outtmpl=episode_path(series, key))
+                log(f"           -> {r.status}" + (f": {r.error[:150]}" if r.error and r.status != "downloaded" else ""))
+                d = r.to_dict()
+                d["episode"] = label
+                downloads.append(d)
+                done = r.status == "downloaded"
+        covered: set[str] = set()
+        mirrors: set[tuple[str, str]] = set()
+        for cand in others:
+            if cancelled():
+                log("[download] cancelled")
+                break
+            n += 1
+            stage(f"Downloading {n}/{total}", 0.45 + 0.4 * (n - 1) / total)
             if cand.source == "network" and (cand.label, urlparse(cand.url).path) in mirrors:
                 downloads.append({"candidate": cand.to_dict(), "status": "skipped", "files": [], "info": {},
                                   "error": "mirror of a stream already downloaded (same path, other host)"})
@@ -155,7 +220,7 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None
                 downloads.append({"candidate": cand.to_dict(), "status": "skipped", "files": [], "info": {},
                                   "error": "stream belongs to an embed that was already downloaded"})
                 continue
-            log(f"[download {i}/{len(candidates)}] {cand.kind}: {cand.url[:110]}" + (f"  [{cand.label}]" if cand.label else ""))
+            log(f"[download {n}/{total}] {cand.kind}: {cand.url[:110]}" + (f"  [{cand.label}]" if cand.label else ""))
             r = dl.download(cand)
             log(f"           -> {r.status}" + (f" ({len(r.files)} file(s))" if r.files else "") +
                 (f": {r.error[:150]}" if r.error and r.status != "downloaded" else ""))
@@ -205,6 +270,7 @@ def run(url: str, opts: Options, log: Callable[[str], None] = print, cancel=None
             "highest_severity": ["info", "low", "medium", "high", "critical"][worst],
             "security_findings": len(all_findings),
         },
+        "series": _series_summary(series, episodes, downloads),
         "piracy": site_piracy, "site": site,
         "pages": [{"url": p.url, "final_url": p.final_url, "status": p.status, "error": p.error,
                    "selections": p.selections, "popups": p.popups, "screenshot": p.screenshot} for p in pages],

@@ -116,7 +116,7 @@ class Downloader:
         self.quarantine_files = quarantine_files
         self.dest.mkdir(parents=True, exist_ok=True)
 
-    def _opts(self, cand: VideoCandidate, files: list[str], logger: _Logger) -> dict:
+    def _opts(self, cand: VideoCandidate, files: list[str], logger: _Logger, outtmpl: str | None = None) -> dict:
         headers = {}
         if cand.referer:
             headers["Referer"] = cand.referer
@@ -124,7 +124,7 @@ class Downloader:
             headers["Origin"] = f"{p.scheme}://{p.netloc}"
         if self.user_agent:
             headers["User-Agent"] = self.user_agent
-        tmpl = self.outtmpl or str(Path("%(extractor_key)s") / (_safe_label(cand.label) + "%(title).120B [%(id)s].%(ext)s"))
+        tmpl = outtmpl or self.outtmpl or str(Path("%(extractor_key)s") / (_safe_label(cand.label) + "%(title).120B [%(id)s].%(ext)s"))
         opts = {
             "outtmpl": {"default": str(self.dest / tmpl)},
             "http_headers": headers,
@@ -169,7 +169,7 @@ class Downloader:
                 "filename": d.get("filename") or "",
             })
 
-    def download(self, cand: VideoCandidate) -> DownloadResult:
+    def download(self, cand: VideoCandidate, outtmpl: str | None = None) -> DownloadResult:
         import yt_dlp
 
         files: list[str] = []
@@ -177,7 +177,7 @@ class Downloader:
         before = _snapshot(self.dest)
         res = DownloadResult(candidate=cand, status="error")
         try:
-            with yt_dlp.YoutubeDL(self._opts(cand, files, logger)) as ydl:
+            with yt_dlp.YoutubeDL(self._opts(cand, files, logger, outtmpl)) as ydl:
                 info = ydl.extract_info(cand.url, download=True)
                 if info:
                     entries = info.get("entries")
