@@ -1,6 +1,8 @@
 # WEB-Treasure-Stalker
 
-<img src="wts/gui/assets/icon.svg" alt="WEB-Treasure-Stalker icon" width="112">
+<p align="center">
+  <img src="wts/gui/assets/icon.svg" alt="WEB-Treasure-Stalker icon" width="112">
+</p>
 
 A desktop app (GUI + CLI, Linux and Windows) for blue-team / OSINT work. Give it a link and it:
 
