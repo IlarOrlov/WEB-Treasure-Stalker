@@ -1,0 +1,44 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-11-23T11:03:11Z",
+  "phase": "",
+  "phase_name": "post-release (v0.3.0 shipped)",
+  "phase_dir": "",
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": 1, "name": "Core engine, GUI, exe, no-disk-writes, series, two-step site flow (v0.2.0)", "status": "done", "commit": "a1ac13f"},
+    {"id": 2, "name": "Discovery: season/category pages read in parallel (static), sitemap reading -> berserk-jutsu.su 4 seasons / 62 episodes", "status": "done", "commit": "70e8c42"},
+    {"id": 3, "name": "Player tab switching with per-session preference; protected detection (tokens, encrypted playlists, player-only hosts)", "status": "done", "commit": "70e8c42"},
+    {"id": 4, "name": "Speed: lean quick browser at download time, parallel downloads (--parallel), 8 fragments, quality ladder, parallel script fetch, menu walk early stop", "status": "done", "commit": "70e8c42"},
+    {"id": 5, "name": "Tools page / --install-dir: user-chosen private install folder", "status": "done", "commit": "70e8c42"},
+    {"id": 6, "name": "Release v0.3.0 published (Windows + Linux + SHA256SUMS), CI green", "status": "done", "commit": "70e8c42"}
+  ],
+  "remaining_tasks": [
+    {"id": 7, "name": "Live test of Tools-page installers incl. 'Choose folder…' on a clean Windows 11 machine", "status": "not_started"},
+    {"id": 8, "name": "Measure thementalist.ru analysis time after the menu-walk early stop (was ~305 s)", "status": "not_started"},
+    {"id": 9, "name": "Check stray 'Season 1' video item on thementalist.ru catalogue (unknown if pre-existing)", "status": "not_started"},
+    {"id": 10, "name": "Re-validate other known sites (Good Doctor, yummyanime, filmlord) - URLs not recorded", "status": "not_started"},
+    {"id": 11, "name": "Optional: Windows Process Monitor verification of no-write guarantee", "status": "not_started"}
+  ],
+  "blockers": [
+    {"description": "Auto-mode classifier blocks downloading+executing third-party binaries, so tool installers were never run live", "type": "human_action", "workaround": "User tests Install buttons on the Tools page"}
+  ],
+  "async_jobs": [],
+  "human_actions_pending": [
+    {"action": "Test Tools-page Install buttons (default and custom folder) on Windows 11 without FFmpeg/Chromium", "context": "Installer code untested live", "blocking": false},
+    {"action": "User swaps ~/Desktop/WEB-Treasure-Stalker-test to v0.3.0 themselves", "context": "User declined agent doing it", "blocking": false}
+  ],
+  "decisions": [
+    {"decision": "Never decode/circumvent protection: one-time tokens (alloha), encrypted playlists (vibix/kinescope {\"p\":...}), manifests whose segment hosts don't resolve in DNS (rewall/interkh)", "rationale": "Same line as DRM; detected via response body of captured manifest (no extra request), marked protected, next player tried", "phase": ""},
+    {"decision": "Quality ladder only for '/NNN.mp4:hls:manifest.m3u8' (Kodik CDN): try higher qualities the same player offers", "rationale": "Kodik starts at 360p; 720p exists with same link", "phase": ""},
+    {"decision": "Player preference/misses kept in memory only (module globals in discovery.py)", "rationale": "No disk writes without user command", "phase": ""},
+    {"decision": "Custom tool install folder must be owned by user and not group/world-writable; saved to tool-locations.json (0600) only when used", "rationale": "App executes binaries from there", "phase": ""},
+    {"decision": "No Claude attribution in commits/PRs", "rationale": "User memory rule", "phase": ""}
+  ],
+  "uncommitted_files": [],
+  "next_action": "Ask the user what to do next (v0.3.0 is released). If they report site issues, reproduce with scratch probes (BrowserDiscoverer.analyze(url, enumerate_episodes=False, quick=True) with lean=True, print stream candidates + protected flags) before changing code.",
+  "context_notes": "Repo /home/feanor/Desktop/WEB-Treasure-Stalker (github.com/IlarOrlov/WEB-Treasure-Stalker). venv .venv (uv, py3.13). Tests: .venv/bin/python -m pytest -q -> 58 passed, 2 skipped (~80 s). test_end_to_end failed once then passed 12x (timing flake). Release: push tag vX.Y.Z -> release.yml. berserk-jutsu.su: S2E3/S3E2 only on protected players (kodik shows 'Видео недоступно') - expected."
+}
