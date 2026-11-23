@@ -39,9 +39,19 @@ A desktop app (GUI + CLI, Linux and Windows) for blue-team / OSINT work. Give it
    Tick what you want, pick the folder and format, and download. A series is saved as
    `<Series>/Season N/Episode MM.ext`, a film as `<Title (year)>/<Title (year)>.ext`. Or choose **Save report only**.
 
-Some players sign every stream request with one-time access tokens (for example the Alloha network). Such streams
-are marked **protected** and are not downloaded. The tool then tries the page's other players (e.g. Kodik) and
-uses their unprotected streams when they exist.
+Some players protect their streams: they sign every request with one-time access tokens (for example the Alloha
+network), hand out encrypted playlists that only their own scripts can decode, or point their playlists at hosts
+that only the player can resolve. Such streams are marked **protected** and are never decoded or downloaded. The tool
+switches the page's player tabs/servers (Плеер 1, 2, 3 …) and uses the first player whose stream can be downloaded
+normally (e.g. Kodik). It remembers that player for the rest of the session, so the next episodes go to it directly.
+
+Episode lists come from the page, its season/category pages (read in parallel over plain HTTP) and the site's
+sitemap, so seasons that the start page does not link to are found too.
+
+**Speed:** episode pages are opened in a lean browser (ads, trackers, images and fonts blocked) that stops as soon as
+a downloadable stream appears, while up to 3 episodes download at the same time (`--parallel 1-8`), each with
+parallel HLS/DASH fragment downloads. Higher qualities offered by the same player are tried first, within your
+maximum resolution.
 
 Links that yt-dlp supports directly (YouTube, SoundCloud, Vimeo, TikTok, Bandcamp, Twitch, Dailymotion and
 about 1,700 more) skip the site analysis and get a direct preview: a single item or a playlist to pick from.
@@ -83,7 +93,8 @@ Downloads are verified against their published SHA-256 checksums. Tools you alre
 Chrome, Edge, Node) are detected automatically.
 
 The same file is also the CLI: `WEB-Treasure-Stalker <url> -y -p <folder> -f mp4` (see `--help`).
-Use `--check-tools` to list the helper tools, or `--install ffmpeg|deno|browser|all` to install them.
+Use `--check-tools` to list the helper tools, or `--install ffmpeg|deno|browser|all` to install them
+(add `--install-dir <folder>` to choose where).
 
 > Windows SmartScreen may warn because the exe isn't code-signed: choose *More info → Run anyway*.
 > Each release includes `SHA256SUMS.txt` for verification.
@@ -97,7 +108,8 @@ Use `--check-tools` to list the helper tools, or `--install ffmpeg|deno|browser|
 - **Results:** the piracy score gauge with its reasons, stat tiles, a threats table filterable by severity,
   per-video security status, the located streams and the log. Buttons open the HTML report or the folder.
 - **History:** previous runs. Double-click one to reopen its report or folder.
-- **Tools:** status of FFmpeg, the JS runtime, the browser engine and ClamAV/YARA, with one-click installs.
+- **Tools:** status of FFmpeg, the JS runtime, the browser engine and ClamAV/YARA, with one-click installs into the
+  default folder or a folder you choose.
 - Dark and light themes.
 
 ## Build the executables yourself
@@ -185,7 +197,7 @@ Nothing is written without your command. In detail:
 | When | What, where |
 |---|---|
 | You click **Download** / **Start analysis** | Only inside the folder shown in *Save to*: the media files (YouTube/Spotify; playlists and albums in a sub-folder), or one `<site>_<date-time>` sub-folder for site analysis (videos, report, evidence). Partial files are removed if you cancel. |
-| You click **Install** on the Tools page (asks first, shows the path) | FFmpeg / Deno → `%LOCALAPPDATA%\WEB-Treasure-Stalker\bin` (Linux `~/.local/share/web-treasure-stalker/bin`); Chromium → `%LOCALAPPDATA%\ms-playwright` (Linux `~/.cache/ms-playwright`). |
+| You click **Install** on the Tools page (asks first, shows the path) | FFmpeg / Deno → `%LOCALAPPDATA%\WEB-Treasure-Stalker\bin` (Linux `~/.local/share/web-treasure-stalker/bin`); Chromium → `%LOCALAPPDATA%\ms-playwright` (Linux `~/.cache/ms-playwright`). Or **Choose folder…** to pick your own (it must be private to your account: owned by you and, on Linux, not writable by others, because the app runs what is installed there); that choice is remembered in `tool-locations.json` in the app folder. |
 | You tick **Remember preferences and history** (History page; off by default) | `prefs.json` and `history.json` in the app folder above. Unticking deletes them. |
 | While the app runs | One private temp folder `%TEMP%\wts-session-*` (browser profile, helper caches, session cookies) plus PyInstaller's own `%TEMP%\_MEI*` unpack folder. **Both are deleted when the app closes.** If the app is force-killed (Task Manager → End task), they stay in `%TEMP%` until Windows or Disk Cleanup removes them. |
 

@@ -128,11 +128,21 @@ def _fetch_scripts(pages: list[PageResult], evidence: Path, max_scripts: int, ti
                 seen.add(u)
     scripts_dir = evidence / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
-    for i, u in enumerate(sorted(seen)[:max_scripts]):
-        try:
-            r = requests.get(u, headers={"User-Agent": DEFAULT_UA}, timeout=timeout, stream=True)
-            body = r.raw.read(3_000_000, decode_content=True).decode("utf-8", "replace")
+
+    def get(u: str) -> str | None:
+        try:  # TLS verified; at most 3 MB per script (decompressed)
+            with requests.get(u, headers={"User-Agent": DEFAULT_UA}, timeout=timeout, stream=True) as r:
+                return r.raw.read(3_000_000, decode_content=True).decode("utf-8", "replace")
         except Exception:  # noqa: BLE001
+            return None
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    urls = sorted(seen)[:max_scripts]
+    with ThreadPoolExecutor(max_workers=8) as ex:  # fetched in parallel, results kept in order
+        bodies = list(ex.map(get, urls))
+    for i, (u, body) in enumerate(zip(urls, bodies)):
+        if body is None:
             continue
         (scripts_dir / f"{i:03d}.js").write_text(f"// source: {u}\n{body}")
         out.append((u, body))

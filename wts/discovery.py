@@ -92,8 +92,9 @@ def site_key(url: str) -> str:
 
 
 _SLUG_STOP = {"html", "htm", "php", "watch", "online", "free", "full", "movie", "movies", "film", "films", "serial",
-              "series", "season", "seasons", "episode", "episodes", "sezon", "seriya", "seria", "smotret", "video",
-              "videos", "index", "page", "with", "from", "this", "that", "tvshow", "show", "shows"}
+              "series", "season", "seasons", "episode", "episodes", "sezon", "seriya", "seria", "serija", "seriia",
+              "serii", "smotret", "video", "videos", "index", "page", "with", "from", "this", "that", "tvshow",
+              "show", "shows", "category", "tag", "anime"}
 
 
 def _slug_tokens(url: str) -> set[str]:
@@ -111,6 +112,30 @@ def related_episode_link(base_url: str, link: str) -> bool:
     if len(base_path) > 1 and urlparse(link).path.startswith(base_path):
         return True
     return bool(_slug_tokens(base_url) & _slug_tokens(link))
+
+
+def related_links(html: str, base_url: str, start_url: str, tokens: set[str]) -> list[str]:
+    """Episode/season links on a season-list page that belong to the title being analysed.
+
+    Judged against the start page and the title's slug words (a page like /category/2-sezon/ carries no
+    title in its own URL, so its links cannot be judged against it)."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    out: list[str] = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if href.startswith(("javascript:", "mailto:", "tel:", "#")):
+            continue
+        full = _norm(urljoin(base_url, href))
+        if not _http_url(full) or site_key(full) != site_key(start_url):
+            continue
+        p = urlparse(full)
+        if not EPISODE_LINK_RE.search(p.path + "?" + p.query):
+            continue
+        st = _slug_tokens(full)
+        # same title words, or a title-less section link (/category/4-sezon/); links naming another title are not
+        if (tokens & st) or (related_episode_link(start_url, full) and (not tokens or not st)):
+            out.append(full)
+    return list(dict.fromkeys(out))
 
 
 def classify_url(url: str) -> str:
@@ -252,7 +277,180 @@ def fetch_static(url: str, timeout: int = 30, user_agent: str = DEFAULT_UA) -> P
     return res
 
 
+def fetch_many_static(urls: list[str], timeout: int = 20, workers: int = 6, cancel=None) -> list[PageResult]:
+    """Fetch several pages in parallel (plain HTTP, TLS verified). Order of the result follows `urls`."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not urls:
+        return []
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(urls)))) as ex:
+        futs = [ex.submit(lambda u: PageResult(url=u, error="cancelled") if cancel is not None and cancel.is_set()
+                          else fetch_static(u, timeout), u) for u in urls]
+        return [f.result() for f in futs]
+
+
+# --------------------------------------------------------------------------- sitemaps
+
+_LOC_RE = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>", re.I)
+_SITEMAP_PRIORITY = re.compile(r"post|episod|serie|serial|video|watch|categor|season|sezon|page|movie|anime", re.I)
+_SITEMAP_SKIP = re.compile(r"author|user|image|tag-sitemap|product|attachment|news", re.I)
+
+
+def _get_capped(session: requests.Session, url: str, timeout: int, max_bytes: int) -> bytes | None:
+    """GET with a hard size cap (a hostile server cannot exhaust memory). Gzip bodies are inflated with the
+    same cap, so compression bombs are cut off too."""
+    import zlib
+
+    try:
+        with session.get(url, timeout=timeout, stream=True, allow_redirects=True) as r:
+            if r.status_code != 200 or site_key(r.url) != site_key(url):
+                return None
+            buf = bytearray()
+            for chunk in r.iter_content(64 * 1024):
+                buf += chunk
+                if len(buf) > max_bytes:
+                    return None
+    except requests.RequestException:
+        return None
+    data = bytes(buf)
+    if data[:2] == b"\x1f\x8b":  # .xml.gz served as a file
+        try:
+            d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            data = d.decompress(data, max_bytes)
+            if d.unconsumed_tail:
+                return None
+        except zlib.error:
+            return None
+    return data
+
+
+def sitemap_urls(start_url: str, timeout: int = 15, max_files: int = 25, max_bytes: int = 8_000_000,
+                 max_urls: int = 50_000, cancel=None) -> list[str]:
+    """Same-site page URLs listed in the site's sitemaps (robots.txt `Sitemap:` lines, then the usual paths).
+
+    Only plain-text <loc> values are taken (no XML entity processing, so XXE / billion-laughs do not apply);
+    every response is size-capped and only same-site URLs are followed."""
+    from concurrent.futures import ThreadPoolExecutor
+    from html import unescape
+
+    p = urlparse(start_url)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        return []
+    root = f"{p.scheme}://{p.netloc}"
+    s = requests.Session()
+    s.headers["User-Agent"] = DEFAULT_UA
+    s.max_redirects = 5
+    queue: list[str] = []
+    robots = _get_capped(s, root + "/robots.txt", timeout, 512_000) or b""
+    for line in robots.decode("utf-8", "replace").splitlines():
+        if line.lower().startswith("sitemap:"):
+            u = line.split(":", 1)[1].strip()
+            if _http_url(u) and site_key(u) == site_key(start_url):
+                queue.append(u)
+    if not queue:
+        queue = [root + "/sitemap.xml", root + "/sitemap_index.xml", root + "/wp-sitemap.xml"]
+    seen: set[str] = set()
+    pages: list[str] = []
+    fetched = 0
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        while queue and fetched < max_files and len(pages) < max_urls:
+            if cancel is not None and cancel.is_set():
+                break
+            batch = [u for u in dict.fromkeys(queue) if u not in seen][: max_files - fetched]
+            queue = []
+            seen.update(batch)
+            fetched += len(batch)
+            for data in ex.map(lambda u: _get_capped(s, u, timeout, max_bytes), batch):
+                if not data:
+                    continue
+                text = data.decode("utf-8", "replace")
+                locs = [unescape(m) for m in _LOC_RE.findall(text)]
+                locs = [u for u in locs if _http_url(u) and site_key(u) == site_key(start_url)]
+                if "<sitemapindex" in text[:2000].lower():
+                    subs = [u for u in locs if not _SITEMAP_SKIP.search(urlparse(u).path)]
+                    subs.sort(key=lambda u: 0 if _SITEMAP_PRIORITY.search(urlparse(u).path) else 1)
+                    queue.extend(subs)
+                else:
+                    pages.extend(locs)
+    return list(dict.fromkeys(pages))[:max_urls]
+
+
+def series_tokens(episode_links: list[str]) -> set[str]:
+    """URL slug words shared by most of the episode pages found (e.g. {'berserk'}): identifies the title."""
+    if not episode_links:
+        return set()
+    counts: dict[str, int] = {}
+    for link in episode_links:
+        for t in _slug_tokens(link):
+            counts[t] = counts.get(t, 0) + 1
+    return {t for t, n in counts.items() if n >= max(1, len(episode_links) // 2)}
+
+
 # --------------------------------------------------------------------------- browser
+
+# Trackers and ad networks: blocked in lean (download-time) browsing. Faster page loads, no pre-rolls, and the
+# visit is not profiled. Analysis mode keeps them so the security scan sees what the site really loads.
+TRACKER_RE = re.compile(
+    r"mc\.yandex\.|yandex\.ru/(metrika|ads|an/)|an\.yandex\.|google-analytics|googletagmanager|googlesyndication|"
+    r"doubleclick|adservice\.google|facebook\.net/.*/fbevents|connect\.facebook\.net|top-fwz1\.mail\.ru|"
+    r"counter\.yadro|liveinternet\.ru|hotjar|clarity\.ms|scorecardresearch|quantserve|criteo|taboola|outbrain|"
+    r"popads|popcash|propellerads|onclick(a|ads)|adsterra|hilltopads|mgid\.com|videoroll|adnitro|vak345|"
+    r"betweendigital|adfox|adriver|buzzoola|moevideo|otm-r|exoclick|trafficjunky|realsrv|adnxs|smartadserver|"
+    r"/vast[/?]|vast\.xml|imasdk", re.I)
+
+# Player switchers (tabs / server lists) that swap the embedded player for another provider.
+_PLAYER_TABS_JS = r"""
+() => {
+  const BAD = /(описан|коммент|comment|отзыв|review|трейлер|trailer|информац|\binfo\b|details|похож|similar|related|скачать|download|актер|актёр|\bcast\b|кадры|screens|скрин|рейтинг|rating|войти|login|регистрац|поиск|search|главная|home|меню|menu)/i;
+  const EPI = /(серия|сезон|episode|season|эпизод|bölüm|folge)\s*\d|\d\s*(-?я|-?й)?\s*(серия|сезон|episode|season)/i;
+  const PLAYERISH = /(player|плеер|server|сервер|source|источник|balancer|балансер|mirror|зеркал|voice|озвуч|\btab)/i;
+  const KNOWN = /\b(kodik|alloha|collaps|vibix|rewall|cdnmovies|videocdn|hdvb|ashdi|aniboom|sibnet|rutube|turbo|bazon|zetflix|voidboost|filmix|rezka|lumex|kinobox|youtube|ok\.ru|myvi|dzen|vk|allohatv|videoseed|kinescope|uakino|moonwalk|anilibria|libria|plyr|jwplayer|vidsrc|streamtape|dood|filemoon|mixdrop|voe|upstream)\b/i;
+  const txt = e => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+  const isNav = e => { const a = e.closest('a[href]') || e.querySelector('a[href]'); if (!a) return false;
+    const h = a.getAttribute('href') || ''; return h && !h.startsWith('#') && !h.startsWith('javascript'); };
+  const visible = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const hasPlayer = !!document.querySelector('iframe, video, .player, [class*="player"], [id*="player"]');
+  if (!hasPlayer) return [];
+  const parents = new Set();
+  document.querySelectorAll('[role=tab], [data-slug], [data-player], [data-server], [data-tab], [data-balancer], ' +
+      '[data-provider], [class*="tab"] > *, [class*="player"] li, [class*="server"] li, [class*="source"] li, ' +
+      '[class*="balancer"] > *, [class*="player"] button, [class*="server"] button')
+    .forEach(e => { if (e.parentElement) parents.add(e.parentElement); });
+  let best = null, bestScore = 0;
+  for (const p of parents) {
+    const kids = Array.from(p.children).filter(visible);
+    if (kids.length < 2 || kids.length > 12) continue;
+    const names = kids.map(k => k.getAttribute('data-slug') || k.getAttribute('data-player') || k.getAttribute('data-server')
+                                 || k.getAttribute('data-balancer') || k.getAttribute('data-provider') || txt(k));
+    if (names.some(n => !n || n.length > 30)) continue;
+    // real switchers are siblings of one kind (same tag and class), not a tab bar next to its content panel
+    if (!kids.every(k => k.tagName === kids[0].tagName && (k.classList[0] || '') === (kids[0].classList[0] || ''))) continue;
+    if (kids.some(k => BAD.test(txt(k)) || EPI.test(txt(k)) || isNav(k))) continue;
+    const meta = [p.className, p.id, p.parentElement ? p.parentElement.className + ' ' + p.parentElement.id : '',
+                  ...kids.map(k => k.className + ' ' + Object.keys(k.dataset).join(' ') + ' ' + names[kids.indexOf(k)])].join(' ');
+    let score = (PLAYERISH.test(meta) ? 2 : 0) + names.filter(n => KNOWN.test(n)).length * 2 +
+                (kids.some(k => k.getAttribute('role') === 'tab') ? 1 : 0);
+    if (score > bestScore) { best = {kids, names}; bestScore = score; }
+  }
+  document.querySelectorAll('[data-wts-tab]').forEach(e => e.removeAttribute('data-wts-tab'));
+  if (!best || bestScore < 2) return [];
+  return best.kids.map((k, i) => {
+    k.setAttribute('data-wts-tab', String(i));
+    const active = /(^|[\s_-])(active|current|selected|is-active|on)([\s_-]|$)/i.test(k.className) ||
+                   k.getAttribute('aria-selected') === 'true';
+    return {name: best.names[i].slice(0, 30), active};
+  });
+}
+"""
+
+# Remembered per site for this app session (memory only): the player tab that produced a downloadable stream,
+# and how often each tab gave nothing downloadable (tried last next time).
+_PLAYER_PREF: dict[str, str] = {}
+_PLAYER_MISSES: dict[str, dict[str, int]] = {}
+_UNAVAILABLE_RE = re.compile(
+    r"видео недоступно|недоступн[оа] для|не найдено|не доступно|файл удал|видео удал|not available|isn'?t available|"
+    r"unavailable|video not found|file (was )?(deleted|removed)|has been removed|no longer available|try another player",
+    re.I)
 
 _RELEVANT_SELECTS_JS = r"""
 (kw) => {
@@ -332,13 +530,51 @@ _PLAY_SELECTORS = [
 ]
 
 
+class _QuickDone(Exception):
+    pass
+
+
+_DNS_CACHE: dict[str, bool] = {}
+_ABS_URL_RE = re.compile(rb"https?://([a-z0-9.-]+\.[a-z]{2,})(?::\d+)?/", re.I)
+
+
+def _resolves(host: str, timeout: float = 3.0) -> bool:
+    """DNS lookup with a time limit (getaddrinfo itself has none)."""
+    if host in _DNS_CACHE:
+        return _DNS_CACHE[host]
+    import socket
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FTimeout
+
+    ex = ThreadPoolExecutor(max_workers=1)
+    try:
+        ok = bool(ex.submit(socket.getaddrinfo, host, 443).result(timeout=timeout))
+    except FTimeout:
+        ok = True  # slow DNS is not proof of anything
+    except OSError:
+        ok = False
+    finally:
+        ex.shutdown(wait=False)
+    _DNS_CACHE[host] = ok
+    return ok
+
+
+def _manifest_hosts_resolve(body: bytes, manifest_url: str) -> bool:
+    """False when a manifest's segments/variants live only on hosts that do not exist in public DNS: the
+    player rewrites them with its own scripts (an anti-download measure, treated like DRM)."""
+    own = (urlparse(manifest_url).hostname or "").lower()
+    hosts = list(dict.fromkeys(h.decode("ascii", "ignore").lower() for h in _ABS_URL_RE.findall(body)))
+    hosts = [h for h in hosts if h != own and not h.endswith(("w3.org", "mpeg.org", "dashif.org", "apple.com"))][:4]
+    return not hosts or any(_resolves(h) for h in hosts)
+
+
 class BrowserDiscoverer:
     """Headless Chromium session. Use as a context manager."""
 
     def __init__(self, evidence_dir: Path, timeout: int = 30, headful: bool = False,
                  user_agent: str = DEFAULT_UA, max_combinations: int = 300, max_clicks: int = 200,
                  log: Callable[[str], None] = print, on_event: Callable[[str], None] | None = None,
-                 page_budget: int = 240, cancel=None):
+                 page_budget: int = 240, cancel=None, lean: bool = False):
+        self.lean = lean  # download-time browsing: block trackers/ads/images/fonts
         self.evidence_dir = evidence_dir
         self.timeout_ms = timeout * 1000
         self.headful = headful
@@ -358,6 +594,9 @@ class BrowserDiscoverer:
         self._popup_pages: list = []
         self._combos = 0
         self._page_no = 0
+        self._stream_resp: dict = {}
+        self._checked: set[str] = set()
+        self._noted_obfuscated: set[str] = set()
 
     # lifecycle -------------------------------------------------------------
     def __enter__(self) -> "BrowserDiscoverer":
@@ -381,7 +620,20 @@ class BrowserDiscoverer:
         self._ctx.on("request", self._on_request)
         self._ctx.on("response", self._on_response)
         self._ctx.on("page", self._on_page)
+        if self.lean:
+            self._ctx.route("**/*", self._route)
         return self
+
+    @staticmethod
+    def _route(route) -> None:
+        try:
+            req = route.request
+            if req.resource_type in ("image", "font") or TRACKER_RE.search(req.url):
+                route.abort()
+            else:
+                route.continue_()
+        except Exception:  # noqa: BLE001  (page closed meanwhile)
+            pass
 
     def __exit__(self, *exc) -> None:
         for obj in (self._ctx, self._browser):
@@ -427,12 +679,42 @@ class BrowserDiscoverer:
                 if (is_media_response(resp.url, entry["type"], ct) and not PLATFORM_CDN_RE.search(resp.url)
                         and not AD_MEDIA_RE.search(resp.url) and not JUNK_MEDIA_RE.search(resp.url)):
                     referer = entry.get("referer") or entry.get("frame") or self._res.url
+                    kind = ("audio" if ct.lower().startswith("audio/") else
+                            classify_url(resp.url) if MEDIA_URL_RE.search(resp.url) else
+                            "stream" if any(x in ct.lower() for x in ("mpegurl", "dash+xml", "f4m")) else "direct")
+                    if kind == "stream":
+                        self._stream_resp[resp.url] = resp  # its body is checked later (outside this handler)
                     self._res.candidates.append(VideoCandidate(
-                        url=resp.url, kind=("audio" if ct.lower().startswith("audio/") else
-                                            classify_url(resp.url) if MEDIA_URL_RE.search(resp.url) else "direct"),
-                        source="network", referer=referer, label=entry.get("label", ""), page=self._res.url,
-                        protected=bool(entry.get("auth"))))
+                        url=resp.url, kind=kind, source="network", referer=referer, label=entry.get("label", ""),
+                        page=self._res.url, protected=bool(entry.get("auth"))))
                 break
+
+    def _manifest_ok(self, c: VideoCandidate) -> bool:
+        """A captured playlist must be a real HLS/DASH manifest. Players that hand out encrypted or obfuscated
+        playlists (decoded by their own scripts) are treated as protected: never decoded, other players are
+        tried instead. Uses the body the browser already received: no extra request to the server."""
+        if c.kind != "stream" or c.url in self._checked:
+            return not c.protected
+        resp = self._stream_resp.get(c.url)
+        if resp is None:
+            return not c.protected
+        self._checked.add(c.url)
+        try:
+            body = resp.body()[:262_144]
+        except Exception:  # noqa: BLE001  (body no longer available): judge by the download later
+            return not c.protected
+        head = body[:2048].lstrip(b"\xef\xbb\xbf \r\n\t")
+        reason = ""
+        if head and not head.startswith((b"#EXTM3U", b"<?xml", b"<MPD", b"<mpd", b"<manifest", b"<smil")):
+            reason = "is encrypted/obfuscated"
+        elif head and not _manifest_hosts_resolve(body, c.url):
+            reason = "points to hosts that only its player can resolve"
+        if reason:
+            c.protected = True
+            if c.url not in self._noted_obfuscated:
+                self._noted_obfuscated.add(c.url)
+                self.log(f"  playlist from {urlparse(c.referer).hostname} {reason}: treated as protected")
+        return not c.protected
 
     def _on_page(self, page) -> None:
         if self._main_page is not None and page is not self._main_page:
@@ -652,6 +934,123 @@ class BrowserDiscoverer:
         except Exception:  # noqa: BLE001
             pass
 
+    # player switchers (tabs) ---------------------------------------------------
+    def _good_streams(self, since: set[str] | None = None) -> list[VideoCandidate]:
+        """Downloadable (not token-protected) streams/files captured so far (optionally: new since a snapshot)."""
+        return [c for c in self._res.candidates if c.source == "network" and c.kind in ("stream", "direct")
+                and (since is None or c.url not in since) and self._manifest_ok(c)]
+
+    def _player_says_unavailable(self, page) -> bool:
+        for fr in page.frames:
+            if fr is page.main_frame:
+                continue
+            try:
+                box = fr.frame_element().bounding_box()
+                if not box or box["width"] < 100:  # hidden players (other tabs) do not count
+                    continue
+                t = fr.evaluate("() => (document.body && document.body.innerText || '').slice(0, 600)")
+            except Exception:  # noqa: BLE001
+                continue
+            if _UNAVAILABLE_RE.search(t or ""):
+                return True
+        try:  # the site's own message in the (visible) player box, e.g. a tab without any player
+            t = page.main_frame.evaluate("""() => Array.from(document.querySelectorAll(
+                '[class*="player"], [id*="player"], [class*="tab"][class*="content"], [class*="tab"][class*="pane"]'))
+                .filter(e => { const r = e.getBoundingClientRect(); return r.width > 200 && r.height > 100 && !e.querySelector('iframe[src^="http"]'); })
+                .map(e => (e.innerText || '').slice(0, 300)).join(' ').slice(0, 1500)""")
+            return bool(_UNAVAILABLE_RE.search(t or ""))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _player_delivered_protected(self, since: set[str]) -> bool:
+        return any(c.source == "network" and c.kind == "stream" and c.url not in since and not self._manifest_ok(c)
+                   for c in self._res.candidates)
+
+    def _wait_good(self, page, seconds: float, since: set[str] | None = None) -> bool:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if self._good_streams(since):
+                page.wait_for_timeout(800)  # mirrors of the same stream
+                return True
+            if self.cancel is not None and self.cancel.is_set():
+                return False
+            page.wait_for_timeout(250)
+            self._reap_popups()
+        return False
+
+    def _switch_players(self, page, only: str | None = None) -> bool:
+        """The active player gave nothing downloadable (or only token-protected streams): switch the page's
+        player tabs/servers one by one until one loads a stream that can be downloaded."""
+        try:
+            tabs = page.main_frame.evaluate(_PLAYER_TABS_JS)
+        except Exception:  # noqa: BLE001
+            return False
+        if len(tabs) < 2:
+            return False
+        key = site_key(page.url)
+        pref = only or _PLAYER_PREF.get(key)
+        misses = _PLAYER_MISSES.setdefault(key, {})
+        order = [i for i, t in enumerate(tabs) if only or not t["active"] or t["name"] == pref]
+        order.sort(key=lambda i: (0 if tabs[i]["name"] == pref else 1, misses.get(tabs[i]["name"], 0)))
+        if only:
+            order = [i for i in order if tabs[i]["name"] == only]
+        for i in order:
+            if self._stop():
+                break
+            name = tabs[i]["name"]
+            before = self._network_urls()
+            self.log(f"  trying player '{name}'")
+            self._event(f"Trying player {name}")
+            try:
+                page.main_frame.evaluate(_PLAYER_TABS_JS)  # re-mark: tabs may have re-rendered
+                page.locator(f"[data-wts-tab='{i}']").first.click(timeout=3000, no_wait_after=True)
+            except Exception:  # noqa: BLE001
+                continue
+            ok = self._wait_good(page, 4, before)
+            failed = lambda: self._player_says_unavailable(page) or self._player_delivered_protected(before)  # noqa: E731
+            if not ok and not failed():  # most players wait for a click on the poster
+                self._click_player_frames(page)
+                for fr in page.frames:
+                    self._play_in_frame(fr)
+                ok = self._wait_good(page, 3, before)
+                # a pre-roll may be running: keep waiting while the player reports neither an error nor
+                # a protected stream
+                end = time.monotonic() + 22
+                while not ok and time.monotonic() < end and not failed() and not self._stop():
+                    ok = self._wait_good(page, 3, before)
+            if ok:
+                _PLAYER_PREF[key] = name
+                misses.pop(name, None)
+                self.log(f"  player '{name}' provides a downloadable stream")
+                return True
+            misses[name] = misses.get(name, 0) + 1
+            if _PLAYER_PREF.get(key) == name:
+                _PLAYER_PREF.pop(key, None)  # it stopped working for this site: drop the preference
+        return False
+
+    def _quick_capture(self, page) -> None:
+        """Download-time visit of an episode page: stop as soon as a downloadable stream is captured."""
+        if self._wait_good(page, 3):
+            return
+
+        def start_default() -> bool:
+            self._load_lazy_frames(page)
+            self._click_player_frames(page)
+            for fr in page.frames:
+                self._play_in_frame(fr)
+            return self._wait_good(page, 8)
+
+        pref = _PLAYER_PREF.get(site_key(page.url))
+        if not pref and start_default():  # nothing learned yet: the page's default player first
+            return
+        if self._switch_players(page):  # the player that worked on this site before is tried first
+            return
+        if pref and start_default():
+            return
+        self._try_play(page)  # last resort: the full play-button search
+        self._wait_good(page, 6)
+        self._harvest(page, "")
+
     def _walk_player_menus(self, page) -> bool:
         """Select every season/episode in an embedded player and capture the stream it loads.
 
@@ -662,6 +1061,10 @@ class BrowserDiscoverer:
                 frames.append(page.main_frame)
         except Exception:  # noqa: BLE001
             pass
+        # players known to give downloadable streams first, token-protected ones last
+        good = {urlparse(c.referer).hostname for c in self._good_streams()}
+        prot = {urlparse(c.referer).hostname for c in self._res.candidates if c.source == "network" and c.protected}
+        frames.sort(key=lambda f: 0 if urlparse(f.url).hostname in good else 2 if urlparse(f.url).hostname in prot else 1)
         start_url = page.url
         tried_protected = False
         found_any = False
@@ -689,8 +1092,14 @@ class BrowserDiscoverer:
             initial = [c for c in self._res.candidates if c.source == "network" and not c.label
                        and urlparse(c.referer).hostname == fhost]
             first = True
+            captured = misses = 0
             for s in (seasons or [None]):
                 if self._combos >= self.max_combinations or (self.cancel is not None and self.cancel.is_set()):
+                    break
+                if captured == 0 and misses >= 2:
+                    # two selections in a row loaded nothing: this menu does not drive a player (or the player
+                    # refuses headless playback): stop instead of waiting ~40 s on every remaining entry
+                    self.log(f"  {host}: menu selections load no stream; not walking it further")
                     break
                 season_seen = self._network_urls()  # the season's first episode often loads on the season click
                 if s is not None:
@@ -717,7 +1126,7 @@ class BrowserDiscoverer:
                 # generous time budget for big catalogues: ~12 s per episode
                 self._deadline = max(self._deadline, time.monotonic() + 12 * len(eps) + 30)
                 for e in eps:
-                    if self._combos >= self.max_combinations or self._stop():
+                    if self._combos >= self.max_combinations or self._stop() or (captured == 0 and misses >= 2):
                         break
                     label = " / ".join(x for x in (f"Season {s}" if s is not None else "",
                                                     f"Episode {e}" if e is not None else "") if x)
@@ -743,6 +1152,9 @@ class BrowserDiscoverer:
                         got = True
                     if not got:
                         self.log(f"  no stream captured for {label}")
+                        misses += 1
+                    else:
+                        captured += 1
                     first = False
                     self._combos += 1
                     self._res.selections.append(label)
@@ -753,7 +1165,7 @@ class BrowserDiscoverer:
             if mine and all(c.protected for c in mine):
                 # this player signs its streams with one-time tokens: also walk the next player on the page
                 hosts = sorted({urlparse(c.url).hostname for c in mine})
-                self.log(f"  streams of {host} are token-protected ({', '.join(hosts)[:100]}); trying another player")
+                self.log(f"  streams of {host} are protected (tokens or encrypted playlists; {', '.join(hosts)[:100]}); trying another player")
                 tried_protected = True
                 self._combos = 0
                 continue
@@ -824,7 +1236,9 @@ class BrowserDiscoverer:
         return clicked
 
     # main entry ----------------------------------------------------------------
-    def analyze(self, url: str, enumerate_episodes: bool = True) -> PageResult:
+    def analyze(self, url: str, enumerate_episodes: bool = True, quick: bool = False) -> PageResult:
+        """quick=True: download-time visit; returns as soon as a downloadable stream is captured
+        (no menu walking, no screenshot)."""
         res = self._res = PageResult(url=url)
         self._label = ""
         self._combos = 0
@@ -853,6 +1267,10 @@ class BrowserDiscoverer:
                 except Exception:  # noqa: BLE001
                     pass
             self._main_url = page.url
+            if quick:
+                res.final_url = page.url
+                self._quick_capture(page)
+                raise _QuickDone
             self._event("Loading page")
             self._settle(page)
             res.final_url = page.url
@@ -861,6 +1279,8 @@ class BrowserDiscoverer:
             self._event("Starting players")
             self._try_play(page)
             self._harvest(page, "")
+            if not self._good_streams() and self._switch_players(page):
+                self._harvest(page, "")
             if enumerate_episodes and self._walk_player_menus(page):
                 pass  # the embedded player's own playlist was walked
             elif enumerate_episodes:
@@ -878,11 +1298,17 @@ class BrowserDiscoverer:
                 res.screenshot = str(shot)
             except Exception:  # noqa: BLE001
                 pass
+        except _QuickDone:
+            pass
         except Exception as exc:  # noqa: BLE001
             res.error = f"{type(exc).__name__}: {exc}"
             self.log(f"  ! browser error: {res.error}")
         finally:
             self._reap_popups()
+            for c in res.candidates:  # judge captured playlists while their bodies are still available
+                if c.source == "network" and c.kind == "stream":
+                    self._manifest_ok(c)
+            self._stream_resp.clear()
             try:
                 page.close()
             except Exception:  # noqa: BLE001
@@ -892,6 +1318,24 @@ class BrowserDiscoverer:
         res.crawl_links = list(dict.fromkeys(res.crawl_links))
         self._res = None
         return res
+
+
+_QUALITY_RE = re.compile(r"/(240|360|480|720|1080)\.mp4:hls:manifest\.m3u8", re.I)
+
+
+def quality_variants(c: VideoCandidate, max_height: int | None = None) -> list[VideoCandidate]:
+    """Players that start on a low quality and keep one playlist per quality (…/360.mp4:hls:manifest.m3u8):
+    the higher qualities the same player offers are tried first (same link and access, only the quality
+    the player's own quality menu would pick). Missing qualities fail fast and fall back."""
+    from dataclasses import replace
+
+    m = _QUALITY_RE.search(c.url)
+    if not m:
+        return [c]
+    cur = int(m.group(1))
+    ups = [replace(c, url=c.url[:m.start(1)] + str(q) + c.url[m.end(1):])
+           for q in (1080, 720, 480) if q > cur and (not max_height or q <= max_height)]
+    return ups + [c]
 
 
 def write_cookie_jar(cookies: list[dict], path: Path) -> Path:

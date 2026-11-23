@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "web-treasure-stalker"
-version = "0.2.0"
+version = "0.3.0"
 description = "Discover and download all videos on a web site, scan site and media for malware/attacks, and flag likely piracy."
 readme = "README.md"
 requires-python = ">=3.10"

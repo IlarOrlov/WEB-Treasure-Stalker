@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QHeaderView, QMessageBox, QProgressBar, QPushButton, QScrollArea,
+from PySide6.QtWidgets import (QCheckBox, QFileDialog, QHBoxLayout, QHeaderView, QMessageBox, QProgressBar, QPushButton, QScrollArea,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import __version__, history, prefs
@@ -196,13 +196,26 @@ class ToolsPage(QWidget):
         lay.addWidget(sa, 1)
         folder = QPushButton(icons.icon("folder", MUTED, 16), "  Open tools folder")
         folder.setObjectName("ghost")
-        folder.clicked.connect(lambda: open_path(bin_dir()))
-        lay.addLayout(hbox(label(f"Installed tools live in {bin_dir()}", "faint"), None, folder))
+        folder.clicked.connect(lambda: open_path(self._tools_folder()))
+        self.where = label("", "faint", wrap=True)
+        lay.addLayout(hbox(self.where, None, folder))
         self.cards: dict[str, ToolCard] = {}
         self.jobs: dict[str, Job] = {}
         self.refresh()
 
+    @staticmethod
+    def _tools_folder() -> Path:
+        from .. import tools
+
+        d = tools.install_dir("ffmpeg")
+        return d if d.exists() else bin_dir()
+
     def refresh(self) -> None:
+        from .. import tools
+
+        custom = tools.install_locations()
+        self.where.setText("Installed tools live in " + (f"{bin_dir()}" if not custom else
+                           "  ·  ".join(f"{k}: {v}" for k, v in sorted(custom.items()))))
         for st in status():
             if st.key in self.cards:
                 self.cards[st.key].update_status(st)
@@ -224,13 +237,35 @@ class ToolsPage(QWidget):
         from .. import tools
 
         card = self.cards[key]
-        dest = {"ffmpeg": f"{bin_dir()}  (ffmpeg + ffprobe, about 200 MB unpacked)",
-                "js": f"{bin_dir()}  (deno, about 100 MB unpacked)",
-                "browser": f"{tools.browsers_dir()}  (Chromium headless shell, about 250 MB)"}[key]
-        if QMessageBox.question(self, f"Install {card.name.text()}",
-                                f"This downloads {card.name.text()} from its official GitHub release, verifies the "
-                                f"checksum and installs it to:\n\n{dest}\n\nContinue?") != QMessageBox.Yes:
-            return
+        size = {"ffmpeg": "ffmpeg + ffprobe, about 200 MB unpacked", "js": "deno, about 100 MB unpacked",
+                "browser": "Chromium headless shell, about 250 MB"}[key]
+        target = tools.install_dir(key)
+        while True:
+            box = QMessageBox(self)
+            box.setWindowTitle(f"Install {card.name.text()}")
+            box.setIcon(QMessageBox.Question)
+            box.setText(f"This downloads {card.name.text()} from its official GitHub release, verifies the checksum "
+                        f"and installs it to:\n\n{target}\n({size})")
+            box.setInformativeText("Use “Choose folder…” to install somewhere else. The folder must be private to "
+                                   "your account, because the app runs the programs installed there.")
+            ok_btn = box.addButton("Install here", QMessageBox.AcceptRole)
+            choose_btn = box.addButton("Choose folder…", QMessageBox.ActionRole)
+            box.addButton(QMessageBox.Cancel)
+            box.setDefaultButton(ok_btn)
+            box.exec()
+            if box.clickedButton() is ok_btn:
+                break
+            if box.clickedButton() is not choose_btn:
+                return
+            picked = QFileDialog.getExistingDirectory(self, f"Install {card.name.text()} into…", str(target))
+            if not picked:
+                continue
+            err = tools.check_install_dir(Path(picked))
+            if err:
+                QMessageBox.warning(self, "Folder not usable", f"{picked}\n\n{err}")
+                continue
+            target = Path(picked)
+        dest = None if Path(target).resolve() == tools.default_install_dir(key).resolve() else Path(target)
         card.btn.setEnabled(False)
         card.btn.setText("  Installing…")
         card.bar.show()
@@ -240,11 +275,11 @@ class ToolsPage(QWidget):
         def work(ctx):
             prog = lambda done, total: ctx.progress({"status": "dl", "downloaded": done, "total": total})  # noqa: E731
             if key == "ffmpeg":
-                return tools.install_ffmpeg(prog, ctx.cancel)
+                return tools.install_ffmpeg(prog, ctx.cancel, dest)
             if key == "js":
-                return tools.install_deno(prog, ctx.cancel)
+                return tools.install_deno(prog, ctx.cancel, dest)
             if key == "browser":
-                return tools.install_browser(ctx.log, ctx.cancel)
+                return tools.install_browser(ctx.log, ctx.cancel, dest)
             raise ValueError(key)
 
         job = Job(work, self)

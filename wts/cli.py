@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,8 @@ def build_parser() -> argparse.ArgumentParser:
     t = p.add_argument_group("setup")
     t.add_argument("--install", choices=["ffmpeg", "deno", "browser", "all"],
                    help="download a helper tool into the app folder and exit")
+    t.add_argument("--install-dir", metavar="FOLDER",
+                   help="with --install: install into this folder instead of the default (must be private to you)")
     t.add_argument("--check-tools", action="store_true", help="show which helper tools are available and exit")
     g = p.add_argument_group("download choices (asked interactively when omitted)")
     g.add_argument("-p", "--path", "-o", "--out", dest="path",
@@ -40,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max-combinations", type=int, default=300,
                    help="max season/episode selector combinations per page [300]")
     s.add_argument("--max-playlist", type=int, default=50, help="max items per playlist embedded in a site [50]")
+    s.add_argument("--parallel", type=int, default=3, choices=range(1, 9), metavar="N",
+                   help="episodes/items downloaded at the same time, 1-8 [3]")
     s.add_argument("--subs", action="store_true", help="also download subtitles (scanned for payloads)")
     s.add_argument("--virustotal", action="store_true",
                    help="look up site URL and file hashes on VirusTotal (needs VT_API_KEY; sends URL+hashes, never files)")
@@ -99,12 +104,16 @@ def _tools_cmd(a: argparse.Namespace) -> int:
     for t in targets:
         print(f"Installing {t}…")
         try:
+            dest = a.install_dir
+            if dest:  # one folder for all: the browser goes into a sub-folder of it
+                dest = os.path.join(os.path.abspath(os.path.expanduser(dest)), "ms-playwright") if t == "browser" \
+                    else os.path.abspath(os.path.expanduser(dest))
             if t == "ffmpeg":
-                tools.install_ffmpeg(bar)
+                tools.install_ffmpeg(bar, dest=dest)
             elif t == "deno":
-                tools.install_deno(bar)
+                tools.install_deno(bar, dest=dest)
             else:
-                tools.install_browser(print)
+                tools.install_browser(print, dest=dest)
             print(f"\n  {t}: done")
         except Exception as exc:  # noqa: BLE001
             print(f"\n  {t}: FAILED: {exc}")
@@ -122,7 +131,8 @@ def _run_site(url: str, a: argparse.Namespace, prompter: Prompter) -> int:
     opts = Options(browser=not a.no_browser, download=not a.no_download, max_pages=a.max_pages,
                    depth=a.depth, max_combinations=a.max_combinations, timeout=a.timeout, cookies=a.cookies,
                    cookies_from_browser=a.cookies_from_browser, deep=a.deep, virustotal=a.virustotal,
-                   headful=a.headful, subtitles=a.subs, av=not a.no_av, max_playlist=a.max_playlist)
+                   headful=a.headful, subtitles=a.subs, av=not a.no_av, max_playlist=a.max_playlist,
+                   parallel=a.parallel)
     # 1) analyse: discover every media item and scan the site (nothing is downloaded yet)
     an = analyse(url, opts)
     s = an.report["summary"]

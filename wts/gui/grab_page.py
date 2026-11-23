@@ -386,6 +386,10 @@ class GrabPage(QWidget):
         self.opt_pages = QSpinBox()
         self.opt_pages.setRange(1, 200)
         self.opt_pages.setValue(25)
+        self.opt_parallel = QSpinBox()
+        self.opt_parallel.setRange(1, 8)
+        self.opt_parallel.setValue(3)
+        self.opt_parallel.setToolTip("Episodes / items downloaded at the same time")
         self.opt_menus = QCheckBox("Walk season / episode menus and buttons")
         self.opt_menus.setChecked(True)
         self.opt_browser = QCheckBox("Render with browser engine")
@@ -401,6 +405,8 @@ class GrabPage(QWidget):
         g.addWidget(self.opt_depth, 0, 1)
         g.addWidget(label("Max pages to visit", "muted"), 1, 0)
         g.addWidget(self.opt_pages, 1, 1)
+        g.addWidget(label("Parallel downloads", "muted"), 2, 0)
+        g.addWidget(self.opt_parallel, 2, 1)
         g.addWidget(self.opt_menus, 0, 2)
         g.addWidget(self.opt_browser, 1, 2)
         g.addWidget(self.opt_headful, 2, 2)
@@ -862,7 +868,8 @@ class GrabPage(QWidget):
 
         opts = Options(browser=self.opt_browser.isChecked(), max_pages=self.opt_pages.value(),
                        depth=self.opt_depth.value(), max_combinations=300 if self.opt_menus.isChecked() else 0,
-                       deep=self.opt_deep.isChecked(), headful=self.opt_headful.isChecked(), av=self.opt_av.isChecked())
+                       deep=self.opt_deep.isChecked(), headful=self.opt_headful.isChecked(), av=self.opt_av.isChecked(),
+                       parallel=self.opt_parallel.value())
         url = self.site_url
         self._job_items = 0
         self.analysis = None

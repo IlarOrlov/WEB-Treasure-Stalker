@@ -52,12 +52,109 @@ def bin_dir(create: bool = False) -> Path:
     return d
 
 
-def browsers_dir() -> Path:
+def default_browsers_dir() -> Path:
     if IS_WIN:
         return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "ms-playwright"
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Caches" / "ms-playwright"
     return Path.home() / ".cache" / "ms-playwright"
+
+
+# --------------------------------------------------------------------------- install locations
+# Only written when the user installs a tool into a folder of their choice (a user command). The file maps
+# "ffmpeg" / "js" / "browser" to that folder so the tool is found again on the next start.
+
+INSTALL_KEYS = ("ffmpeg", "js", "browser")
+
+
+def _locations_file() -> Path:
+    return data_dir() / "tool-locations.json"
+
+
+def install_locations() -> dict[str, Path]:
+    import json
+
+    try:
+        raw = json.loads(_locations_file().read_text())
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, Path] = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if k in INSTALL_KEYS and isinstance(v, str) and Path(v).is_absolute() and check_install_dir(Path(v)) is None:
+                out[k] = Path(v)
+    return out
+
+
+def default_install_dir(key: str) -> Path:
+    return default_browsers_dir() if key == "browser" else bin_dir()
+
+
+def install_dir(key: str) -> Path:
+    """Where the tool `key` is installed: the user's chosen folder, else the default."""
+    return install_locations().get(key) or default_install_dir(key)
+
+
+def browsers_dir() -> Path:
+    return install_dir("browser")
+
+
+def check_install_dir(path: Path, create: bool = False) -> str | None:
+    """None if `path` is a safe place to install executables, else the reason it is not.
+
+    The app later *runs* what is installed there, so the folder must be private to the user: owned by them and
+    (POSIX) not writable by group/others, otherwise another account could replace the binaries."""
+    try:
+        path = Path(path).expanduser()
+        if not path.is_absolute():
+            return "choose an absolute folder path"
+        if create:
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        real = path.resolve(strict=True)
+    except OSError as exc:
+        return f"the folder cannot be used: {exc.strerror or exc}"
+    if not real.is_dir():
+        return "that path is not a folder"
+    if _SESSION_TMP is not None and (real == _SESSION_TMP.resolve() or _SESSION_TMP.resolve() in real.parents):
+        return "the session temporary folder is deleted when the app exits"
+    if real == Path(real.anchor):
+        return "choose a folder, not the root of a drive"
+    if not IS_WIN:
+        st = real.stat()
+        if st.st_uid != os.getuid():
+            return "the folder belongs to another user"
+        if st.st_mode & 0o022:
+            return ("other users can write to this folder (permissions "
+                    f"{oct(st.st_mode & 0o777)}); use a private folder (e.g. chmod 700)")
+    if not os.access(real, os.W_OK | os.X_OK):
+        return "you do not have write permission for this folder"
+    return None
+
+
+def set_install_location(key: str, path: Path | None) -> None:
+    """Remember a custom install folder (None = back to the default). Written atomically, readable only by
+    the user."""
+    import json
+
+    if key not in INSTALL_KEYS:
+        raise ValueError(key)
+    locs = {k: str(v) for k, v in install_locations().items()}
+    if path is None or Path(path).resolve() == default_install_dir(key).resolve():
+        if key not in locs:
+            return
+        locs.pop(key)
+    else:
+        locs[key] = str(Path(path).resolve())
+    f = _locations_file()
+    if not locs:
+        f.unlink(missing_ok=True)
+        return
+    data_dir(create=True)
+    tmp = f.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(locs, fh, indent=1)
+    os.replace(tmp, f)
 
 
 _SESSION_TMP: Path | None = None
@@ -95,12 +192,16 @@ def setup_environment() -> None:
     global _ENV_READY
     # PyInstaller's playwright hook sets PLAYWRIGHT_BROWSERS_PATH=0 (inside the temporary bundle); use the
     # normal per-user location so an engine installed from the Tools page is found.
-    if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") in (None, "", "0"):
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir())
-    b = str(bin_dir())
+    locs = install_locations()
+    if "browser" in locs:
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(locs["browser"])
+    elif os.environ.get("PLAYWRIGHT_BROWSERS_PATH") in (None, "", "0"):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(default_browsers_dir())
     parts = os.environ.get("PATH", "").split(os.pathsep)
-    if b not in parts:
-        os.environ["PATH"] = os.pathsep.join([b] + parts)
+    for b in reversed(list(dict.fromkeys(str(d) for d in (locs.get("ffmpeg"), locs.get("js"), bin_dir()) if d))):
+        if b not in parts:
+            parts.insert(0, b)
+    os.environ["PATH"] = os.pathsep.join(parts)
     if _ENV_READY:
         return
     _ENV_READY = True
@@ -233,17 +334,33 @@ def _verify(data: bytes, expected: str | None, name: str) -> None:
         raise RuntimeError(f"checksum mismatch for {name} (expected {expected[:16]}…, got {got[:16]}…)")
 
 
-def _place(name: str, data: bytes) -> Path:
-    dest = bin_dir(create=True) / name
+def _target_dir(key: str, dest: Path | str | None) -> Path:
+    if dest is None:
+        return bin_dir(create=True) if key != "browser" else default_browsers_dir()
+    err = check_install_dir(Path(dest), create=True)
+    if err:
+        raise RuntimeError(f"cannot install into {dest}: {err}")
+    return Path(dest).resolve()
+
+
+def _place(name: str, data: bytes, folder: Path | None = None) -> Path:
+    folder = folder or bin_dir(create=True)
+    dest = folder / name
     tmp = dest.with_suffix(dest.suffix + ".part")
-    tmp.write_bytes(data)
+    if tmp.is_symlink() or dest.is_symlink():
+        raise RuntimeError(f"refusing to write through a symbolic link: {dest}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o700)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
     if not IS_WIN:
-        tmp.chmod(0o755)
+        tmp.chmod(0o755 if folder == bin_dir() else 0o700)
     os.replace(tmp, dest)
     return dest
 
 
-def install_ffmpeg(progress: ProgressCB | None = None, cancel: threading.Event | None = None) -> str:
+def install_ffmpeg(progress: ProgressCB | None = None, cancel: threading.Event | None = None,
+                   dest: Path | str | None = None) -> str:
+    folder = _target_dir("ffmpeg", dest)
     base = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/"
     if IS_WIN:
         asset = f"ffmpeg-master-latest-win{'arm' if _arch() == 'arm64' else ''}64-gpl.zip"
@@ -259,21 +376,24 @@ def install_ffmpeg(progress: ProgressCB | None = None, cancel: threading.Event |
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             for n in z.namelist():
                 if Path(n).name in wanted and "/bin/" in n:
-                    _place(Path(n).name, z.read(n))
+                    _place(Path(n).name, z.read(n), folder)
                     found += 1
     else:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as t:
             for m in t.getmembers():
                 if Path(m.name).name in wanted and "/bin/" in m.name and m.isfile():
-                    _place(Path(m.name).name, t.extractfile(m).read())
+                    _place(Path(m.name).name, t.extractfile(m).read(), folder)
                     found += 1
     if found < 2:
         raise RuntimeError("ffmpeg archive did not contain ffmpeg and ffprobe")
+    set_install_location("ffmpeg", folder if dest is not None else None)
     setup_environment()
-    return str(bin_dir())
+    return str(folder)
 
 
-def install_deno(progress: ProgressCB | None = None, cancel: threading.Event | None = None) -> str:
+def install_deno(progress: ProgressCB | None = None, cancel: threading.Event | None = None,
+                 dest: Path | str | None = None) -> str:
+    folder = _target_dir("js", dest)
     triple = {("win", "x64"): "x86_64-pc-windows-msvc", ("linux", "x64"): "x86_64-unknown-linux-gnu",
               ("linux", "arm64"): "aarch64-unknown-linux-gnu", ("win", "arm64"): "x86_64-pc-windows-msvc"}
     key = ("win" if IS_WIN else "linux", _arch())
@@ -283,17 +403,21 @@ def install_deno(progress: ProgressCB | None = None, cancel: threading.Event | N
     data = _download(base + asset, progress, cancel)
     _verify(data, expected[0] if expected else None, asset)
     with zipfile.ZipFile(io.BytesIO(data)) as z:
-        _place(f"deno{EXE}", z.read(f"deno{EXE}"))
+        _place(f"deno{EXE}", z.read(f"deno{EXE}"), folder)
+    set_install_location("js", folder if dest is not None else None)
     setup_environment()
-    return str(bin_dir() / f"deno{EXE}")
+    return str(folder / f"deno{EXE}")
 
 
-def install_browser(line: Callable[[str], None] | None = None, cancel: threading.Event | None = None) -> str:
+def install_browser(line: Callable[[str], None] | None = None, cancel: threading.Event | None = None,
+                    dest: Path | str | None = None) -> str:
     """Download Playwright's headless Chromium using the bundled Playwright driver."""
     from playwright._impl._driver import compute_driver_executable, get_driver_env
 
+    folder = _target_dir("browser", dest)
+    env = {**get_driver_env(), "PLAYWRIGHT_BROWSERS_PATH": str(folder)}
     node, cli = compute_driver_executable()
-    proc = subprocess.Popen([node, cli, "install", "--only-shell", "chromium"], env=get_driver_env(),
+    proc = subprocess.Popen([node, cli, "install", "--only-shell", "chromium"], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **_no_window())
     assert proc.stdout is not None
     for ln in proc.stdout:
@@ -304,6 +428,8 @@ def install_browser(line: Callable[[str], None] | None = None, cancel: threading
             line(ln.rstrip())
     if proc.wait() != 0:
         raise RuntimeError("browser installation failed")
+    set_install_location("browser", folder if dest is not None else None)
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(folder)
     found = find_browser()
     return found[1] if found else ""
 
