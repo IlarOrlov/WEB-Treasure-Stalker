@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import re
 import io
 import os
 import platform
@@ -326,6 +327,24 @@ def _download(url: str, progress: ProgressCB | None, cancel: threading.Event | N
     return buf.getvalue()
 
 
+_HEX64 = re.compile(r"\b[0-9a-fA-F]{64}\b")
+
+
+def _parse_sha256(text: str, asset: str) -> str | None:
+    """Find the SHA-256 for ``asset`` in a checksum file.
+
+    Handles ``sha256sum`` output (``<hash>  <name>``, one or many lines) and
+    PowerShell ``Get-FileHash`` output (``Hash : <HASH>``), which deno publishes
+    for its Windows builds."""
+    lines = [ln for ln in text.splitlines() if _HEX64.search(ln)]
+    named = [ln for ln in lines
+             if any(re.split(r"[\\/*]", tok)[-1] == asset for tok in ln.split())]
+    pick = named or (lines if len(lines) == 1 else [])
+    if not pick:
+        return None
+    return _HEX64.search(pick[0]).group(0).lower()
+
+
 def _verify(data: bytes, expected: str | None, name: str) -> None:
     if not expected:
         raise RuntimeError(f"no published checksum found for {name}; refusing to install")
@@ -367,7 +386,7 @@ def install_ffmpeg(progress: ProgressCB | None = None, cancel: threading.Event |
     else:
         asset = f"ffmpeg-master-latest-linux{'arm' if _arch() == 'arm64' else ''}64-gpl.tar.xz"
     sums = requests.get(base + "checksums.sha256", timeout=30).text
-    expected = next((ln.split()[0] for ln in sums.splitlines() if ln.strip().endswith(asset)), None)
+    expected = _parse_sha256(sums, asset)
     data = _download(base + asset, progress, cancel)
     _verify(data, expected, asset)
     wanted = {f"ffmpeg{EXE}", f"ffprobe{EXE}"}
@@ -399,9 +418,9 @@ def install_deno(progress: ProgressCB | None = None, cancel: threading.Event | N
     key = ("win" if IS_WIN else "linux", _arch())
     asset = f"deno-{triple[key]}.zip"
     base = "https://github.com/denoland/deno/releases/latest/download/"
-    expected = requests.get(base + asset + ".sha256sum", timeout=30).text.split()
+    expected = _parse_sha256(requests.get(base + asset + ".sha256sum", timeout=30).text, asset)
     data = _download(base + asset, progress, cancel)
-    _verify(data, expected[0] if expected else None, asset)
+    _verify(data, expected, asset)
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         _place(f"deno{EXE}", z.read(f"deno{EXE}"), folder)
     set_install_location("js", folder if dest is not None else None)

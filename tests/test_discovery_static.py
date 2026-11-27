@@ -64,6 +64,8 @@ def test_episode_keys_and_titles():
     assert episode_key(V("https://cdn/v.mp4", "direct", "video-source", page="https://x/seasons/season-2/episode-4")) == (2, 4)
     assert series_title("<title>Менталист (1-7 сезон) смотреть онлайн бесплатно все серии</title>", "x") == "Менталист"
     assert series_title("<title>Сериал Менталист все сезоны и серии смотреть Бесплатно</title>", "x") == "Менталист"
+    assert series_title("<h1>Операция: Семейка Ёдзакура</h1>", "x") == "Операция - Семейка Ёдзакура"
+    assert series_title("<title>Breaking Bad: watch online</title>", "x") == "Breaking Bad"
     assert episode_path("Менталист", (1, 3)) == "Менталист/Season 1/Episode 03.%(ext)s"
 
 
@@ -73,3 +75,50 @@ def test_episode_key_repeated_season():
 
     assert episode_key(V("https://mp.thementalist.ru/The-Mentalist-season-3-episode-3-17.mp4", "direct", "inline-script")) == (3, 17)
     assert episode_key(V("https://x/Show-season-2-episode-11-1080p.mp4", "direct", "link")) == (2, 11)
+
+
+def test_continuation_part_pages_continue_episode_numbers():
+    """yummyanime: '2 сезон' has episodes 1-12 and '2 сезон. Часть 2' numbers its 7 episodes from 1 again."""
+    from wts.episodes import group_episodes
+    from wts.models import VideoCandidate as V
+    p1 = "https://y.tv/4995-show-2-sezon-f3.html"
+    p2 = "https://y.tv/9025-show-2-sezon-chast-2.html"
+    ref = "https://kodikplayer.com/serial/1/x/720p"
+    cands = [V(f"https://cdn/a{e}.m3u8", "stream", "network", ref, f"Season 2 / Episode {e}", p1) for e in range(1, 13)]
+    cands += [V(f"https://cdn/b{e}.m3u8", "stream", "network", ref, f"Season 2 / Episode {e}", p2) for e in range(1, 8)]
+    eps, rest = group_episodes(cands)
+    assert sorted(eps) == [(2, e) for e in range(1, 20)]
+    assert eps[(2, 13)][0].url == "https://cdn/b1.m3u8"
+    assert eps[(2, 13)][0].label == "Season 2 / Episode 13"
+
+
+def test_continuation_part_already_continuing_is_kept():
+    from wts.episodes import group_episodes
+    from wts.models import VideoCandidate as V
+    p1 = "https://y.tv/1-show.html"
+    p2 = "https://y.tv/2-show-part-2.html"
+    cands = [V(f"https://cdn/a{e}.m3u8", "stream", "network", "https://pl/x", f"Season 1 / Episode {e}", p1) for e in (1, 2)]
+    cands += [V(f"https://cdn/b{e}.m3u8", "stream", "network", "https://pl/x", f"Season 1 / Episode {e}", p2) for e in (3, 4)]
+    eps, _ = group_episodes(cands)
+    assert sorted(eps) == [(1, 1), (1, 2), (1, 3), (1, 4)]
+
+
+def test_same_episode_on_two_plain_pages_is_not_renumbered():
+    from wts.episodes import group_episodes
+    from wts.models import VideoCandidate as V
+    cands = [V("https://cdn/a.m3u8", "stream", "network", "https://pl/x", "Season 1 / Episode 1", "https://y.tv/show"),
+             V("https://cdn/b.m3u8", "stream", "network", "https://pl/x", "Season 1 / Episode 1", "https://y.tv/show/ep1")]
+    eps, _ = group_episodes(cands)
+    assert list(eps) == [(1, 1)] and len(eps[(1, 1)]) == 2
+
+
+def test_protected_unlabelled_stream_dropped_when_series_found():
+    """The site's default player (token-protected) is not a separate video once the episodes were captured."""
+    from wts.episodes import group_episodes
+    from wts.models import VideoCandidate as V
+    page = "https://y.tv/1-show.html"
+    cands = [V("https://cdn/a.m3u8", "stream", "network", "https://kodik/x", "Season 1 / Episode 1", page),
+             V("https://userplay.live/0/tok", "stream", "network", "https://alloha/x", "", page, protected=True),
+             V("https://www.youtube.com/embed/abc", "platform-link", "iframe", page, "", page)]
+    eps, rest = group_episodes(cands)
+    assert [c.url for c in rest] == ["https://www.youtube.com/embed/abc"]

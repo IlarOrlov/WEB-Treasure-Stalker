@@ -68,3 +68,26 @@ def test_place_refuses_symlink(appdata):
     (folder / "ffmpeg").symlink_to(appdata / "elsewhere")
     with pytest.raises(RuntimeError, match="symbolic link"):
         tools._place("ffmpeg", b"x", folder)
+
+
+# --- checksum files -------------------------------------------------------------------
+
+def test_parse_sha256_powershell_format():
+    """deno publishes Windows checksums as PowerShell Get-FileHash output."""
+    from wts.tools import _parse_sha256
+    text = ("\r\nAlgorithm : SHA256\r\n"
+            "Hash      : CBA84B26E0DF5AE7F74FC66B86A95B866872A86292EBD84FA1E959927EDD93BF\r\n"
+            "Path      : C:\\a\\deno\\target\\release\\deno-x86_64-pc-windows-msvc.zip\r\n\r\n")
+    assert _parse_sha256(text, "deno-x86_64-pc-windows-msvc.zip") == \
+        "cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf"
+
+
+def test_parse_sha256_sha256sum_formats():
+    from wts.tools import _parse_sha256
+    one = "e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609  deno-x86_64-unknown-linux-gnu.zip\n"
+    assert _parse_sha256(one, "deno-x86_64-unknown-linux-gnu.zip").startswith("e890975b")
+    many = ("a" * 64 + "  ffmpeg-master-latest-win64-gpl-shared.zip\n"
+            + "b" * 64 + " *ffmpeg-master-latest-win64-gpl.zip\n")
+    assert _parse_sha256(many, "ffmpeg-master-latest-win64-gpl.zip") == "b" * 64
+    assert _parse_sha256(many, "other.zip") is None
+    assert _parse_sha256("not found", "x.zip") is None

@@ -148,3 +148,28 @@ def test_player_tabs_skip_encrypted_and_unavailable(tmp_path):
     assert streams.get("good.m3u8") is False, (streams, logs)  # the next working player was used
     assert discovery._PLAYER_PREF[discovery.site_key(url)] == "gamma"
     assert any("encrypted/obfuscated" in m for m in logs)
+
+
+@pytest.mark.browser
+def test_player_tabs_ignore_watchlist_and_trailer(tmp_path):
+    """yummyanime: span tabs where only the active one has a class, a trailer tab beside them, and watch-list
+    buttons ('Запланировано', 'Брошено', ...) elsewhere on the page."""
+    if not _have_browser():
+        pytest.skip("Playwright Chromium not installed")
+    root = Path(__file__).parent / "site" / "tabs"
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(_Quiet, directory=str(root)))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/watchlist.html"
+    discovery._PLAYER_PREF.clear()
+    discovery._PLAYER_MISSES.clear()
+    logs: list[str] = []
+    try:
+        with discovery.BrowserDiscoverer(tmp_path, 10, log=logs.append, lean=True) as bd:
+            bd.page_budget = 60
+            res = bd.analyze(url, enumerate_episodes=False, quick=True)
+    finally:
+        srv.shutdown()
+    tried = [m for m in logs if "trying player" in m]
+    assert tried == ["  trying player 'Kodik'"], logs
+    streams = {c.url.rsplit("/", 1)[1]: c.protected for c in res.candidates if c.kind == "stream"}
+    assert streams.get("good.m3u8") is False, (streams, logs)

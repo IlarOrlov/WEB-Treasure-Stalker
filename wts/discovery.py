@@ -401,7 +401,9 @@ TRACKER_RE = re.compile(
 # Player switchers (tabs / server lists) that swap the embedded player for another provider.
 _PLAYER_TABS_JS = r"""
 () => {
-  const BAD = /(описан|коммент|comment|отзыв|review|трейлер|trailer|информац|\binfo\b|details|похож|similar|related|скачать|download|актер|актёр|\bcast\b|кадры|screens|скрин|рейтинг|rating|войти|login|регистрац|поиск|search|главная|home|меню|menu)/i;
+  const BAD = /(описан|коммент|comment|отзыв|review|информац|\binfo\b|details|похож|similar|related|скачать|download|актер|актёр|\bcast\b|кадры|screens|скрин|рейтинг|rating|войти|login|регистрац|поиск|search|главная|home|меню|menu|смотрю|просмотрен|запланир|брошен|отложен|буду смотреть|watching|watched|plan to watch|dropped|on hold|completed|избран|favou?rite|закладк|bookmark)/i;
+  // a trailer tab sits next to the real players: skip it, but keep the group
+  const SKIP = /(трейлер|trailer|тизер|teaser)/i;
   const EPI = /(серия|сезон|episode|season|эпизод|bölüm|folge)\s*\d|\d\s*(-?я|-?й)?\s*(серия|сезон|episode|season)/i;
   const PLAYERISH = /(player|плеер|server|сервер|source|источник|balancer|балансер|mirror|зеркал|voice|озвуч|\btab)/i;
   const KNOWN = /\b(kodik|alloha|collaps|vibix|rewall|cdnmovies|videocdn|hdvb|ashdi|aniboom|sibnet|rutube|turbo|bazon|zetflix|voidboost|filmix|rezka|lumex|kinobox|youtube|ok\.ru|myvi|dzen|vk|allohatv|videoseed|kinescope|uakino|moonwalk|anilibria|libria|plyr|jwplayer|vidsrc|streamtape|dood|filemoon|mixdrop|voe|upstream)\b/i;
@@ -409,6 +411,8 @@ _PLAYER_TABS_JS = r"""
   const isNav = e => { const a = e.closest('a[href]') || e.querySelector('a[href]'); if (!a) return false;
     const h = a.getAttribute('href') || ''; return h && !h.startsWith('#') && !h.startsWith('javascript'); };
   const visible = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const STATE = /^(is-)?(active|current|selected|on|open|checked)$/i;
+  const kindClass = e => Array.from(e.classList).find(c => !STATE.test(c)) || '';
   const hasPlayer = !!document.querySelector('iframe, video, .player, [class*="player"], [id*="player"]');
   if (!hasPlayer) return [];
   const parents = new Set();
@@ -418,13 +422,14 @@ _PLAYER_TABS_JS = r"""
     .forEach(e => { if (e.parentElement) parents.add(e.parentElement); });
   let best = null, bestScore = 0;
   for (const p of parents) {
-    const kids = Array.from(p.children).filter(visible);
+    const kids = Array.from(p.children).filter(visible).filter(k => !SKIP.test(txt(k)));
     if (kids.length < 2 || kids.length > 12) continue;
     const names = kids.map(k => k.getAttribute('data-slug') || k.getAttribute('data-player') || k.getAttribute('data-server')
                                  || k.getAttribute('data-balancer') || k.getAttribute('data-provider') || txt(k));
     if (names.some(n => !n || n.length > 30)) continue;
     // real switchers are siblings of one kind (same tag and class), not a tab bar next to its content panel
-    if (!kids.every(k => k.tagName === kids[0].tagName && (k.classList[0] || '') === (kids[0].classList[0] || ''))) continue;
+    // (state classes such as "active" do not count: only the selected tab carries them)
+    if (!kids.every(k => k.tagName === kids[0].tagName && kindClass(k) === kindClass(kids[0]))) continue;
     if (kids.some(k => BAD.test(txt(k)) || EPI.test(txt(k)) || isNav(k))) continue;
     const meta = [p.className, p.id, p.parentElement ? p.parentElement.className + ' ' + p.parentElement.id : '',
                   ...kids.map(k => k.className + ' ' + Object.keys(k.dataset).join(' ') + ' ' + names[kids.indexOf(k)])].join(' ');
@@ -889,15 +894,24 @@ class BrowserDiscoverer:
         except Exception:  # noqa: BLE001
             pass
 
-    def _click_frame_center(self, page, frame) -> None:
+    _FRAME_PLAY_SELECTORS = (".play_button", ".play-button", "[class*='play'][class*='btn']", ".vjs-big-play-button",
+                             ".jw-icon-playback", "pjsdiv[fid='1']")
+
+    def _click_frame_center(self, page, frame, wait_ready: float = 0) -> None:
+        """Click the player's play button (or its centre). wait_ready: right after an episode was selected the
+        player is still loading; wait up to that many seconds for its play button to appear before clicking."""
+        end = time.monotonic() + wait_ready
         try:
-            for sel in (".play_button", ".play-button", "[class*='play'][class*='btn']", ".vjs-big-play-button",
-                        ".jw-icon-playback", "pjsdiv[fid='1']"):
-                loc = frame.locator(sel).first
-                if loc.count() and loc.is_visible(timeout=300):
-                    loc.click(timeout=1500, no_wait_after=True)
-                    self._reap_popups()
-                    return
+            while True:
+                for sel in self._FRAME_PLAY_SELECTORS:
+                    loc = frame.locator(sel).first
+                    if loc.count() and loc.is_visible(timeout=300):
+                        loc.click(timeout=1500, no_wait_after=True)
+                        self._reap_popups()
+                        return
+                if time.monotonic() >= end or self._stop():
+                    break
+                page.wait_for_timeout(400)
             box = frame.frame_element().bounding_box()
             if box and box["width"] > 50:
                 page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
@@ -1093,6 +1107,7 @@ class BrowserDiscoverer:
                        and urlparse(c.referer).hostname == fhost]
             first = True
             captured = misses = 0
+            start_step = 0
             for s in (seasons or [None]):
                 if self._combos >= self.max_combinations or (self.cancel is not None and self.cancel.is_set()):
                     break
@@ -1139,13 +1154,20 @@ class BrowserDiscoverer:
                         except Exception:  # noqa: BLE001
                             pass
                         self._pm_click(frame, "episode", e)
-                    got = self._wait_new_stream(page, label, seen, 12, fhost)
-                    if not got:  # player waits for 'play' (or a pre-roll is running): start it and wait longer
-                        self._play_in_frame(frame)
-                        got = self._wait_new_stream(page, label, seen, 12, fhost)
-                    if not got:  # player shows its poster again: click its play button / centre
-                        self._click_frame_center(page, frame)
-                        got = self._wait_new_stream(page, label, seen, 15, fhost)
+                    # 0: the selection loads the stream by itself; 1: the player waits for 'play' (or a pre-roll
+                    # is running); 2: it shows its poster again and needs a click on its play button / centre.
+                    # The way that worked for the previous episode is tried first (Kodik needs the click every
+                    # time: without this each episode wasted ~24 s on waits that could not succeed).
+                    got = False
+                    for step in [start_step] + [i for i in range(3) if i != start_step]:
+                        if step == 1:
+                            self._play_in_frame(frame)
+                        elif step == 2:
+                            self._click_frame_center(page, frame, wait_ready=10)
+                        got = self._wait_new_stream(page, label, seen, (12, 12, 15)[step], fhost)
+                        if got:
+                            start_step = step
+                            break
                     if not got and first and initial:  # first episode was already loaded before the walk
                         for c in initial:
                             c.label = label

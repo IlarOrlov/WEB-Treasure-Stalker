@@ -96,7 +96,9 @@ The same file is also the CLI: `WEB-Treasure-Stalker <url> -y -p <folder> -f mp4
 Use `--check-tools` to list the helper tools, or `--install ffmpeg|deno|browser|all` to install them
 (add `--install-dir <folder>` to choose where).
 
-> Windows SmartScreen may warn because the exe isn't code-signed: choose *More info → Run anyway*.
+> Windows SmartScreen may warn because the exe isn't code-signed yet: choose *More info → Run anyway*.
+> Unsigned native modules have been removed from the build where possible; see
+> [packaging/SIGNING.md](packaging/SIGNING.md) for what is left and how free signing can be enabled.
 > Each release includes `SHA256SUMS.txt` for verification.
 
 ### The GUI
@@ -223,3 +225,7 @@ and *Operation is WriteFile / CreateFile / RegSetValue*.
 pytest                          # offline: local fixture site, crafted malicious media, unit tests
 WTS_NETWORK_TESTS=1 pytest      # adds live YouTube checks
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE). Bundled third-party components keep their own licenses (PySide6/Qt: LGPL-3.0, yt-dlp: Unlicense, Playwright: Apache-2.0, Inter font: OFL-1.1).

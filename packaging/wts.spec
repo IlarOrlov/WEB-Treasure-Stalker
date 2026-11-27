@@ -22,6 +22,11 @@ excludes = [
     "PySide6.Qt3DCore", "PySide6.QtMultimedia", "PySide6.QtCharts", "PySide6.QtDataVisualization",
     "PySide6.QtPdf", "PySide6.QtNetwork", "PySide6.QtOpenGL", "PySide6.QtSql", "PySide6.QtTest",
     "matplotlib", "numpy", "PIL", "pytest",
+    # Optional native accelerators that ship without a code signature (Windows Smart App Control blocks
+    # unsigned modules from unknown publishers). Each has a pure-Python fallback:
+    #   yt-dlp -> its own AES and no brotli; websockets -> pure-Python frame masking.
+    "Cryptodome", "Crypto", "brotli", "_brotli", "brotlicffi", "websockets.speedups",
+    "greenlet.tests", "greenlet.tests._test_extension", "greenlet.tests._test_extension_cpp",
 ]
 
 a = Analysis(
@@ -32,6 +37,27 @@ a = Analysis(
     excludes=excludes,
     noarchive=False,
 )
+
+if sys.platform == "win32":
+    # Report every native module still bundled without an Authenticode signature (see packaging/SIGNING.md).
+    import struct
+
+    def _signed(path):
+        try:
+            data = Path(path).read_bytes()
+            pe = struct.unpack_from("<I", data, 0x3C)[0]
+            opt = pe + 24
+            dd = opt + (96 if struct.unpack_from("<H", data, opt)[0] == 0x10B else 112)
+            off, size = struct.unpack_from("<II", data, dd + 8 * 4)
+            return bool(off and size)
+        except Exception:  # noqa: BLE001
+            return True  # not a PE file
+
+    unsigned = sorted(dest for dest, src, kind in a.binaries if not _signed(src))
+    print(f"[signing] {len(unsigned)} unsigned native module(s) bundled:")
+    for u in unsigned:
+        print(f"[signing]   {u}")
+
 pyz = PYZ(a.pure)
 
 icon = str(ROOT / "wts" / "gui" / "assets" / ("icon.ico" if sys.platform == "win32" else "icon.png"))

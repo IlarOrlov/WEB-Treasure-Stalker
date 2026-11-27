@@ -38,6 +38,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]" "yt-dlp[default]" pyside6-essentials pyinstaller
 
+      - name: Pure-Python charset_normalizer (its compiled modules are unsigned)
+        shell: bash
+        run: |
+          # Windows Smart App Control blocked charset_normalizer's unsigned cd/md .pyd files. The project also
+          # publishes a pure-Python wheel with the same code; bundle that one instead.
+          pip download --no-deps --only-binary=:all: --platform any --python-version 3.12 \
+            -d purewheel "charset-normalizer==$(python -c 'import charset_normalizer as c; print(c.__version__)')"
+          pip install --force-reinstall --no-deps purewheel/charset_normalizer-*-py3-none-any.whl
+          python -c "import charset_normalizer.md as m, sys; f = m.__file__; print(f); sys.exit(f.endswith('.py') is False)"
+
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen
@@ -63,6 +73,39 @@ jobs:
           $p = Start-Process -FilePath "dist/${{ matrix.asset }}" -ArgumentList "--version" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "smoke test failed: exit $($p.ExitCode)" }
 
+      # Code signing (Windows) through SignPath. Runs only when the repository variables
+      # SIGNPATH_ORGANIZATION_ID / SIGNPATH_PROJECT_SLUG / SIGNPATH_POLICY_SLUG and the secret SIGNPATH_API_TOKEN
+      # are set (see packaging/SIGNING.md); otherwise the executable is released unsigned as before.
+      - name: Upload unsigned executable for signing
+        id: upload-unsigned
+        if: runner.os == 'Windows' && vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+      - name: Sign executable (SignPath)
+        if: runner.os == 'Windows' && vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@a2c5b60d9c75f073142b653c354b632eedce097b # v3.2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600   # each release is approved by hand on SignPath
+          output-artifact-directory: dist-signed
+
+      - name: Use the signed executable
+        if: runner.os == 'Windows' && vars.SIGNPATH_ORGANIZATION_ID != ''
+        shell: pwsh
+        run: |
+          Copy-Item "dist-signed/${{ matrix.asset }}" "dist/${{ matrix.asset }}" -Force
+          $sig = Get-AuthenticodeSignature "dist/${{ matrix.asset }}"
+          if ($sig.Status -ne 'Valid') { throw "signature not valid: $($sig.Status)" }
+          $sig.SignerCertificate.Subject
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
@@ -78,6 +121,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: assets
+          pattern: WEB-Treasure-Stalker-*   # not the unsigned-* copies sent for signing
           merge-multiple: true
       - name: Checksums
         run: cd assets && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
@@ -101,5 +145,5 @@ jobs:
             Run without arguments to open the GUI. Run with arguments to use the CLI
             (e.g. `WEB-Treasure-Stalker <url> -y -p <folder> -f mp4`, or `--help`).
 
-            Windows SmartScreen may warn because the executable is not code-signed. Choose *More info → Run anyway*.
+            If the Windows executable is not code-signed yet, SmartScreen may warn: choose *More info → Run anyway*.
             Verify the file against `SHA256SUMS.txt`.
