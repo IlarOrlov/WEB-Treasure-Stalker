@@ -96,9 +96,9 @@ The same file is also the CLI: `WEB-Treasure-Stalker <url> -y -p <folder> -f mp4
 Use `--check-tools` to list the helper tools, or `--install ffmpeg|deno|browser|all` to install them
 (add `--install-dir <folder>` to choose where).
 
-> Windows SmartScreen may warn because the exe isn't code-signed yet: choose *More info → Run anyway*.
-> Unsigned native modules have been removed from the build where possible; see
-> [packaging/SIGNING.md](packaging/SIGNING.md) for what is left and how free signing can be enabled.
+> Until the Windows executable is code-signed (see [Code signing policy](#code-signing-policy)), SmartScreen
+> may warn (*More info → Run anyway*) and **Smart App Control** may block each new release until Microsoft has
+> checked it. Details: [packaging/SIGNING.md](packaging/SIGNING.md).
 > Each release includes `SHA256SUMS.txt` for verification.
 
 ### The GUI
@@ -210,6 +210,13 @@ and the folder picker is Qt's own, so the Windows "recent folders" lists are not
 You can verify this with Sysinternals **Process Monitor**: filter *Process Name is WEB-Treasure-Stalker.exe*
 and *Operation is WriteFile / CreateFile / RegSetValue*.
 
+### Uninstalling
+
+The app is a single file and has no installer. To remove it completely: delete the executable, the
+`%LOCALAPPDATA%\WEB-Treasure-Stalker` folder (Linux `~/.local/share/web-treasure-stalker`; installed tools,
+`tool-locations.json`, saved preferences and history), `%LOCALAPPDATA%\ms-playwright` if you installed the
+Chromium engine from the Tools page, and any custom tool folder you chose.
+
 ## Safety notes
 
 - Analyse hostile sites from a **disposable VM or container**. Pages are rendered in headless Chromium, and
@@ -225,6 +232,28 @@ and *Operation is WriteFile / CreateFile / RegSetValue*.
 pytest                          # offline: local fixture site, crafted malicious media, unit tests
 WTS_NETWORK_TESTS=1 pytest      # adds live YouTube checks
 ```
+
+## Code signing policy
+
+Windows releases are being set up for free code signing provided by [SignPath.io](https://signpath.io),
+certificate by [SignPath Foundation](https://signpath.org).
+
+- Every release executable is built by GitHub Actions from the tagged source in this repository
+  ([`.github/workflows/release.yml`](.github/workflows/release.yml)); nothing is built or signed on a
+  personal machine.
+- Each signing request is approved by hand before it is signed.
+- Only this project's own executable is signed. Bundled third-party components keep their publishers'
+  signatures (Python, Qt, Playwright) or none (see [packaging/SIGNING.md](packaging/SIGNING.md)).
+
+Team roles:
+
+- Committers and reviewers: [IlarOrlov](https://github.com/IlarOrlov)
+- Approvers: [IlarOrlov](https://github.com/IlarOrlov)
+
+Privacy policy: this program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it. Every network request it makes
+follows a user action (analysing or downloading a URL, installing a tool from the Tools page, or the optional
+VirusTotal lookup with your own API key); it has no telemetry, crash reporting or update checks.
 
 ## License
 

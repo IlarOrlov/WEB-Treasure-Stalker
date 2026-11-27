@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for WEB-Treasure-Stalker (paste into the SignPath project).
+  GitHub delivers the uploaded workflow artifact as a ZIP that contains the single executable.
+  product-name / product-version are checked against the executable's version resource
+  (packaging/version_info.txt), as SignPath Foundation requires. The workflow passes the version
+  (the release tag without the leading "v") as the "version" parameter.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="WEB-Treasure-Stalker-windows-x64.exe"
+             product-name="WEB-Treasure-Stalker"
+             product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

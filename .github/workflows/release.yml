@@ -76,6 +76,20 @@ jobs:
       # Code signing (Windows) through SignPath. Runs only when the repository variables
       # SIGNPATH_ORGANIZATION_ID / SIGNPATH_PROJECT_SLUG / SIGNPATH_POLICY_SLUG and the secret SIGNPATH_API_TOKEN
       # are set (see packaging/SIGNING.md); otherwise the executable is released unsigned as before.
+      - name: Version for signing
+        id: version
+        if: runner.os == 'Windows' && vars.SIGNPATH_ORGANIZATION_ID != ''
+        shell: bash
+        run: |
+          v="$(python -c 'import wts; print(wts.__version__)')"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF#refs/tags/v}" != "$v" ]]; then
+            echo "tag ${GITHUB_REF#refs/tags/} does not match wts.__version__ $v"; exit 1
+          fi
+          # SignPath checks the executable's ProductVersion against this value
+          grep -q "StringStruct('ProductVersion', '$v')" packaging/version_info.txt \
+            || { echo "packaging/version_info.txt ProductVersion is not $v"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: Upload unsigned executable for signing
         id: upload-unsigned
         if: runner.os == 'Windows' && vars.SIGNPATH_ORGANIZATION_ID != ''
@@ -96,6 +110,9 @@ jobs:
           wait-for-completion: true
           wait-for-completion-timeout-in-seconds: 3600   # each release is approved by hand on SignPath
           output-artifact-directory: dist-signed
+          # product version checked by packaging/signpath/artifact-configuration.xml
+          parameters: |
+            version: "${{ steps.version.outputs.version }}"
 
       - name: Use the signed executable
         if: runner.os == 'Windows' && vars.SIGNPATH_ORGANIZATION_ID != ''
@@ -145,5 +162,7 @@ jobs:
             Run without arguments to open the GUI. Run with arguments to use the CLI
             (e.g. `WEB-Treasure-Stalker <url> -y -p <folder> -f mp4`, or `--help`).
 
-            If the Windows executable is not code-signed yet, SmartScreen may warn: choose *More info → Run anyway*.
+            If the Windows executable is not code-signed yet, SmartScreen may warn (*More info → Run anyway*) and
+            Smart App Control may block a new release until Microsoft has checked it.
+            [Code signing policy](https://github.com/${{ github.repository }}#code-signing-policy)
             Verify the file against `SHA256SUMS.txt`.

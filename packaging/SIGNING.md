@@ -39,35 +39,50 @@ SignPath Foundation signs releases of open-source projects for free, with a cert
   security-scanning tools that run inside the execution environment" (this app scans remote sites and
   downloaded media, not the machine it runs on, but they decide).
 
-### Steps
+### Status
 
-1. ~~Add an OSI license~~ done: MIT (`LICENSE`).
-2. Enable MFA on GitHub.
-3. Apply at https://signpath.org/apply.
-4. Once accepted, in SignPath: create the project, an artifact configuration for a ZIP containing
-   `WEB-Treasure-Stalker-windows-x64.exe` (GitHub delivers artifacts zipped) with product name
-   `WEB-Treasure-Stalker`, and a release signing policy. Create an API token for a submitter user and
-   install the SignPath GitHub App on the repository.
-5. In GitHub → Settings → Secrets and variables → Actions:
-   - secret `SIGNPATH_API_TOKEN`
-   - variables `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_POLICY_SLUG`
-6. Push a release tag. `release.yml` then sends the Windows executable to SignPath, waits (up to 1 hour)
-   for the manual approval, checks the signature and releases the signed file. Without those variables the
-   workflow releases the unsigned executable as before.
-7. Add the policy section below to README.md and the release notes.
+| Requirement | State |
+|---|---|
+| OSI license | done: MIT (`LICENSE`) |
+| Public repository, released in the form that will be signed | done: GitHub releases built by CI |
+| "Code signing policy" on home page and release page | done: README section + link in every release's notes |
+| Privacy statement, uninstall instructions | done: README ("Code signing policy", "Uninstalling") |
+| Product name / version in the executable | done: `packaging/version_info.txt`; CI fails if it does not match the tag |
+| CI signing step | done: `release.yml` (inactive until the variables below exist) |
+| Artifact configuration | ready: `packaging/signpath/artifact-configuration.xml` |
+| MFA on GitHub (and later SignPath) | **you** |
+| Application | **you** |
 
-```markdown
-## Code signing policy
+### Your steps
 
-Free code signing provided by [SignPath.io](https://signpath.io), certificate by
-[SignPath Foundation](https://signpath.org).
-
-- Committers and reviewers: <GitHub user names>
-- Approvers: <GitHub user names>
-
-Privacy policy: this program does not transfer any information to other networked systems unless
-specifically requested by the user or the person installing or operating it.
-```
+1. **GitHub MFA**: GitHub → Settings → Password and authentication → enable two-factor authentication.
+2. **Apply** at https://signpath.org/apply. Suggested answers:
+   - Project: WEB-Treasure-Stalker, https://github.com/IlarOrlov/WEB-Treasure-Stalker
+   - License: MIT
+   - Description: desktop app (Windows/Linux) that analyses a web page the user enters, finds the videos
+     it plays, downloads them on request with yt-dlp, scans the page and the downloaded media for malware
+     indicators, and reports whether the site looks like a piracy portal. It does not scan or modify the
+     computer it runs on.
+   - Artifacts to sign: one PyInstaller executable per release (`WEB-Treasure-Stalker-windows-x64.exe`),
+     built by GitHub Actions from the tagged source.
+   - Code signing policy: https://github.com/IlarOrlov/WEB-Treasure-Stalker#code-signing-policy
+3. **After acceptance**, in SignPath:
+   - enable MFA on your SignPath account;
+   - create the project (slug e.g. `WEB-Treasure-Stalker`) and link the GitHub repository as a trusted
+     build system (install the SignPath GitHub App on the repository if asked);
+   - add an artifact configuration with the contents of `packaging/signpath/artifact-configuration.xml`
+     and make it the project's **default** (the workflow uses the default);
+   - use the release signing policy SignPath Foundation sets up (with manual approval);
+   - create a CI user with *submitter* permission for that policy and an API token for it.
+4. **GitHub → repository → Settings → Secrets and variables → Actions**:
+   - *Secrets*: `SIGNPATH_API_TOKEN` = the API token
+   - *Variables*: `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_POLICY_SLUG`
+5. **README**: replace the first sentence of "Code signing policy" with SignPath's required wording:
+   `Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).`
+6. **Release**: bump the version (pyproject.toml, `wts/__init__.py`, `packaging/version_info.txt`) and push
+   a tag. The workflow sends the Windows executable to SignPath and waits up to 1 hour; approve the request
+   on SignPath; the workflow then checks the signature (`Get-AuthenticodeSignature` must be *Valid*) and
+   publishes the signed file.
 
 ### What signing fixes and what it does not
 
