@@ -1,0 +1,46 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-11-27T10:03:42Z",
+  "phase": "",
+  "phase_name": "post-release (v0.3.1 shipped; SignPath application pending)",
+  "phase_dir": "",
+  "plan": null,
+  "task": null,
+  "total_tasks": null,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": 1, "name": "Deno checksum fix: parse PowerShell Get-FileHash format (_parse_sha256 in wts/tools.py)", "status": "done", "commit": "a49d3a2"},
+    {"id": 2, "name": "yummyanime: player tabs (trailer skip, state classes, watch-list words), Kodik walk speed (start_step + wait_ready), season part renumbering, protected default stream dropped, ':' titles -> 46 eps / 2 seasons", "status": "done", "commit": "a49d3a2"},
+    {"id": 3, "name": "Build: pure-Python charset_normalizer, excluded unsigned optional modules; only greenlet unsigned (CI [signing] report)", "status": "done", "commit": "a49d3a2"},
+    {"id": 4, "name": "MIT license; v0.3.1 released, CI green", "status": "done", "commit": "a49d3a2"},
+    {"id": 5, "name": "SignPath readiness: README Code signing policy + privacy + uninstall, artifact-configuration.xml, release.yml signing step (pinned SHA, version param + checks), SIGNING.md guide; v0.3.1 release notes edited with policy link", "status": "done", "commit": "07008fa"},
+    {"id": 6, "name": "User submitted SignPath Foundation application; GitHub 2FA on", "status": "done", "commit": "164c860"}
+  ],
+  "remaining_tasks": [
+    {"id": 7, "name": "After SignPath acceptance: user sets up project/config/token/vars; agent switches README sentence to exact SignPath wording, bumps version, tags first signed release, verifies Get-AuthenticodeSignature", "status": "not_started"},
+    {"id": 8, "name": "User verifies v0.3.1 on the Windows device (deno install, Smart App Control messages)", "status": "not_started"},
+    {"id": 9, "name": "Measure thementalist.ru analysis time; check stray 'Season 1' item there", "status": "not_started"},
+    {"id": 10, "name": "Re-validate Good Doctor, filmlord (URLs needed)", "status": "not_started"},
+    {"id": 11, "name": "Optional: portable build with PSF-signed Python runtime (option D, user did not choose it)", "status": "not_started"}
+  ],
+  "blockers": [
+    {"description": "Smart App Control blocks every new unsigned release exe until Microsoft has reviewed it", "type": "external", "workaround": "User submits each release at microsoft.com/wdsi/filesubmission; real fix is SignPath signing"},
+    {"description": "greenlet._greenlet (Playwright core dependency) stays unsigned even with SignPath", "type": "technical", "workaround": "none free; browser analysis may be blocked on SAC machines"},
+    {"description": "SignPath may reject for low reputation (0 stars, ~18 downloads)", "type": "external", "workaround": "re-apply later"}
+  ],
+  "async_jobs": [],
+  "human_actions_pending": [
+    {"action": "Wait for SignPath reply; on acceptance follow packaging/SIGNING.md 'Your steps' 3-4", "context": "Application submitted 2026-11-27", "blocking": false},
+    {"action": "Submit v0.3.1 exe to Microsoft file submission and test it on the Windows device", "context": "SAC blocked v0.3.1", "blocking": false}
+  ],
+  "decisions": [
+    {"decision": "MIT license", "rationale": "Most recommended permissive OSI license; compatible with bundled LGPL PySide6, Apache Playwright, Unlicense yt-dlp, OFL Inter", "phase": ""},
+    {"decision": "SignPath step inactive until repo vars exist; README says signing is 'being set up' until accepted", "rationale": "Do not claim signing before it exists", "phase": ""},
+    {"decision": "Season parts (Часть N / part-N / cour-N) renumber only when colliding with earlier parts", "rationale": "Avoid renumbering duplicate episode pages", "phase": ""},
+    {"decision": "No Claude attribution in commits", "rationale": "User memory rule", "phase": ""},
+    {"decision": "Never decode/circumvent protection", "rationale": "Same line as DRM", "phase": ""}
+  ],
+  "uncommitted_files": [],
+  "next_action": "Ask the user whether SignPath replied. If accepted and secrets/vars are set: change README policy sentence to the exact SignPath wording, bump version in pyproject.toml, wts/__init__.py, packaging/version_info.txt, run tests with pipefail, commit, tag, watch release.yml (signing waits up to 1h for manual approval).",
+  "context_notes": "Repo /home/feanor/Desktop/WEB-Treasure-Stalker (github.com/IlarOrlov/WEB-Treasure-Stalker). venv .venv (uv, py3.13). Tests: 65 passed, 2 skipped (~100 s). context-mode hook redirects curl/inline HTTP: use ctx_execute with cwd for fetches. Agent tool calls with web-fetch get a hook-modified input: reissue once with the exact quoted input."
+}
